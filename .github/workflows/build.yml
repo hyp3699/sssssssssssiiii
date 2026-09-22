@@ -145,27 +145,34 @@ jobs:
             -o "${{ matrix.output }}" \
             ./cmd/sing-box
 
-      - name: Verify binary
+            - name: Verify binary
         run: |
           set -euo pipefail
 
           BINARY="${{ matrix.output }}"
 
-          echo "检查文件..."
-          ls -lh "$BINARY"
+          echo "======================================"
+          echo "检查编译产物"
+          echo "======================================"
 
+          ls -lh "$BINARY"
           file "$BINARY"
 
           echo
-          echo "检查 sing-box 版本..."
-          ./"$BINARY" version
+          echo "目标架构: ${{ matrix.goarch }}"
+
+          if [ "${{ matrix.goarch }}" = "amd64" ]; then
+            echo
+            echo "检查 sing-box 版本..."
+            ./"$BINARY" version
+          else
+            echo
+            echo "ARM64 为交叉编译产物"
+            echo "当前 Runner 为 AMD64，跳过直接执行测试"
+          fi
 
           echo
-          echo "检查 XHTTP..."
-          ./"$BINARY" help 2>/dev/null | grep -qi xhttp || true
-
-          echo
-          echo "检查完成"
+          echo "二进制文件检查完成"
 
       - name: Create archive
         run: |
