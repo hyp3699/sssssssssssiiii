@@ -29,7 +29,7 @@ jobs:
             sed 's/^v//'
           )"
 
-          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "null" ]; then
+          if [ -z "$UPSTREAM_VERSION" ] \vert{}\vert{} [ "$UPSTREAM_VERSION" = "null" ]; then
             echo "ERROR: Failed to detect official sing-box version"
             exit 1
           fi
@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Checkout official sing-box
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box
           ref: v${{ needs.get-version.outputs.upstream_version }}
@@ -61,9 +61,9 @@ jobs:
           submodules: recursive
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.26.8"
+          go-version: "1.24.x"
           cache: true
 
       - name: Verify sing-box source
@@ -499,7 +499,7 @@ jobs:
             -trimpath \
             -o "sing-box-linux-${{ matrix.arch }}" \
             -tags "${TAGS}" \
-            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}'${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
 
       - name: Verify binary
@@ -589,7 +589,7 @@ jobs:
           echo "XHTTP configuration check PASSED."
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: sing-box-${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi-linux-${{ matrix.arch }}
           path: sing-box-linux-${{ matrix.arch }}
@@ -605,7 +605,7 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           path: release-files
 
@@ -655,13 +655,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi
-
           name: sing-box v${{ needs.get-version.outputs.upstream_version }} XHTTP + V2Ray API
-
           make_latest: false
-
           generate_release_notes: false
-
           body: |
             Based on official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}.
 
@@ -681,9 +677,7 @@ jobs:
             - Linux arm64
 
             This build does not use sing-box-lx.
-
           files: |
             release/sing-box-linux-amd64.tar.gz
             release/sing-box-linux-arm64.tar.gz
-
           fail_on_unmatched_files: true
