@@ -1,104 +1,133 @@
-name: Build sing-box
+name: Build sing-box with XHTTP
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 2 * * *"
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
 
+env:
+  SING_BOX_REPO: SagerNet/sing-box
+  XHTTP_REPO: justinwoo280/sing-xhttp
+
 jobs:
   get-version:
-    runs-on: ubuntu-24.04
+    name: Get latest versions
+    runs-on: ubuntu-latest
 
     outputs:
-      upstream_version: ${{ steps.version.outputs.upstream_version }}
+      sing_box_version: ${{ steps.version.outputs.sing_box_version }}
       xhttp_version: ${{ steps.version.outputs.xhttp_version }}
 
     steps:
-      - name: Get latest versions
+      - name: Get latest stable versions
         id: version
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=========================================="
-          echo "Getting latest official sing-box release"
-          echo "=========================================="
+          echo "==> Getting latest official sing-box stable release..."
 
-          UPSTREAM_VERSION="$(
+          SING_BOX_VERSION="$(
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/SagerNet/sing-box/releases/latest" |
-            jq -r '.tag_name'
+              "https://api.github.com/repos/${SING_BOX_REPO}/releases/latest" |
+            python3 -c '
+          import json
+          import sys
+
+          data = json.load(sys.stdin)
+
+          if data.get("prerelease"):
+              raise SystemExit("GitHub latest release is unexpectedly a prerelease")
+
+          tag = data.get("tag_name", "")
+          if not tag.startswith("v"):
+              raise SystemExit(f"Invalid sing-box release tag: {tag}")
+
+          print(tag)
+          '
           )"
 
-          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "null" ]; then
-            echo "ERROR: Failed to detect latest sing-box release."
-            exit 1
-          fi
-
-          case "$UPSTREAM_VERSION" in
-            v*) ;;
-            *)
-              echo "ERROR: Invalid sing-box release tag: $UPSTREAM_VERSION"
-              exit 1
-              ;;
-          esac
-
-          echo "Official sing-box: $UPSTREAM_VERSION"
-
+          echo "Official sing-box: ${SING_BOX_VERSION}"
 
           echo
-          echo "=========================================="
-          echo "Getting latest sing-xhttp tag"
-          echo "=========================================="
+          echo "==> Getting latest sing-xhttp tag..."
 
           XHTTP_VERSION="$(
             git ls-remote \
               --tags \
               --refs \
-              "https://github.com/justinwoo280/sing-xhttp.git" |
-            awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+(\.[0-9]+)?([.-].*)?$/ {print $NF}' |
+              "https://github.com/${XHTTP_REPO}.git" |
+            awk -F/ '
+              $NF ~ /^v[0-9]+\.[0-9]+(\.[0-9]+)?([.-].*)?$/ {
+                print $NF
+              }
+            ' |
             sort -V |
             tail -n 1
           )"
 
-          if [ -z "$XHTTP_VERSION" ]; then
-            echo "ERROR: Failed to detect latest sing-xhttp tag."
+          if [ -z "${XHTTP_VERSION}" ]; then
+            echo "ERROR: Could not determine latest sing-xhttp tag"
             exit 1
           fi
 
-          echo "Latest sing-xhttp: $XHTTP_VERSION"
+          echo "sing-xhttp: ${XHTTP_VERSION}"
 
+          echo
+          echo "==> Version summary"
+          echo "sing-box = ${SING_BOX_VERSION}"
+          echo "sing-xhttp = ${XHTTP_VERSION}"
 
-          echo "upstream_version=${UPSTREAM_VERSION#v}" >> "$GITHUB_OUTPUT"
-          echo "xhttp_version=${XHTTP_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "sing_box_version=${SING_BOX_VERSION}"
+            echo "xhttp_version=${XHTTP_VERSION}"
+          } >> "${GITHUB_OUTPUT}"
 
 
   build:
-    needs: get-version
+    name: Build ${{ matrix.arch }}
+    needs:
+      - get-version
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: true
       matrix:
-        arch:
-          - amd64
-          - arm64
+        include:
+          - arch: amd64
+            goarch: amd64
+          - arch: arm64
+            goarch: arm64
 
     steps:
       - name: Checkout official sing-box
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          repository: SagerNet/sing-box
-          ref: v${{ needs.get-version.outputs.upstream_version }}
-          submodules: recursive
-          fetch-depth: 1
+          repository: ${{ env.SING_BOX_REPO }}
+          ref: ${{ needs.get-version.outputs.sing_box_version }}
+          fetch-depth: 0
 
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="${{ needs.get-version.outputs.sing_box_version }}"
+          ACTUAL="$(git describe --tags --exact-match 2>/dev/null || true)"
+
+          echo "Expected sing-box: ${EXPECTED}"
+          echo "Checked out tag:   ${ACTUAL}"
+
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "ERROR: checkout is not the expected sing-box release"
+            exit 1
+          fi
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -106,36 +135,57 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-
-      - name: Verify official source files
+      - name: Show build environment
         shell: bash
         run: |
           set -euo pipefail
 
-          for file in \
-            constant/v2ray.go \
-            option/v2ray_transport.go \
-            transport/v2ray/transport.go \
-            release/DEFAULT_BUILD_TAGS \
-            release/LDFLAGS
-          do
-            if [ ! -f "$file" ]; then
-              echo "ERROR: Required file not found: $file"
-              exit 1
-            fi
-          done
+          echo "Go:"
+          go version
 
-          echo "All required files exist."
+          echo
+          echo "sing-box:"
+          git describe --tags --exact-match
 
+          echo
+          echo "Architecture:"
+          echo "${{ matrix.goarch }}"
 
-      - name: Add latest sing-xhttp dependency
+      - name: Verify expected sing-box source structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f constant/v2ray.go
+          test -f option/v2ray_transport.go
+          test -f transport/v2ray/transport.go
+
+          grep -Eq \
+            'V2RayTransportTypeHTTPUpgrade[[:space:]]*=[[:space:]]*"httpupgrade"' \
+            constant/v2ray.go
+
+          grep -Eq \
+            'type V2RayTransportOptions _V2RayTransportOptions' \
+            option/v2ray_transport.go
+
+          grep -Eq \
+            'func NewServerTransport\(' \
+            transport/v2ray/transport.go
+
+          grep -Eq \
+            'func NewClientTransport\(' \
+            transport/v2ray/transport.go
+
+          echo "Expected sing-box source structure verified."
+
+      - name: Add sing-xhttp dependency
         shell: bash
         env:
           XHTTP_VERSION: ${{ needs.get-version.outputs.xhttp_version }}
         run: |
           set -euo pipefail
 
-          echo "sing-xhttp version: ${XHTTP_VERSION}"
+          echo "Adding sing-xhttp ${XHTTP_VERSION}"
 
           go mod edit \
             -require="github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
@@ -143,217 +193,489 @@ jobs:
           go mod download \
             "github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
 
+          echo
+          echo "Resolved dependency:"
+          go list -m "github.com/justinwoo280/sing-xhttp"
 
-      - name: Patch official sing-box source
+      - name: Patch sing-box for XHTTP
         shell: bash
+        env:
+          XHTTP_VERSION: ${{ needs.get-version.outputs.xhttp_version }}
         run: |
           set -euo pipefail
 
           python3 <<'PY'
           from pathlib import Path
+          import sys
 
-
-          def replace_exact(path, old, new, description):
-              path = Path(path)
-              source = path.read_text()
+          def replace_exact(path, old, new, expected_count=1):
+              p = Path(path)
+              source = p.read_text()
 
               count = source.count(old)
 
-              if count != 1:
-                  raise SystemExit(
-                      f"ERROR: {description}: "
-                      f"expected exactly 1 match, found {count}"
+              if count != expected_count:
+                  print(
+                      f"ERROR: {path}: expected exactly "
+                      f"{expected_count} occurrence(s), found {count}"
                   )
+                  print("---- expected source fragment ----")
+                  print(old)
+                  print("---- end fragment ----")
+                  raise SystemExit(1)
 
-              path.write_text(source.replace(old, new, 1))
+              p.write_text(source.replace(old, new, expected_count))
+              print(f"PATCHED: {path}")
 
-              print(f"OK: {description}")
+          def create_exact(path, content):
+              p = Path(path)
 
+              if p.exists():
+                  print(f"ERROR: {path} already exists")
+                  raise SystemExit(1)
 
-          # ============================================================
-          # constant/v2ray.go
-          # ============================================================
+              p.write_text(content)
+              print(f"CREATED: {path}")
+
+          # ------------------------------------------------------------
+          # 1. constant/v2ray.go
+          # ------------------------------------------------------------
 
           replace_exact(
               "constant/v2ray.go",
-
               '''\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"
-          ''',
-
+''',
               '''\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"
-          \tV2RayTransportTypeXHTTP = "xhttp"
-          ''',
-
-              "Add XHTTP transport constant"
+\tV2RayTransportTypeXHTTP        = "xhttp"
+''',
           )
 
-
-          # ============================================================
-          # option/v2ray_transport.go
-          # ============================================================
+          # ------------------------------------------------------------
+          # 2. option/v2ray_transport.go
+          #
+          # Mirror sing-xhttp v0.1.6 xhttp.Options exactly.
+          # This deliberately does NOT import sing-xhttp from option/.
+          # The transport bridge performs the conversion.
+          # ------------------------------------------------------------
 
           replace_exact(
               "option/v2ray_transport.go",
-
-              '''\tC "github.com/sagernet/sing-box/constant"
-          \t"github.com/sagernet/sing-box/schema"
-          ''',
-
-              '''\tC "github.com/sagernet/sing-box/constant"
-          \t"github.com/justinwoo280/sing-xhttp/xhttp"
-          \t"github.com/sagernet/sing-box/schema"
-          ''',
-
-              "Add sing-xhttp import"
+              '''\tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
+\tHTTPOptions        V2RayHTTPOptions        `json:"-"`
+\tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+\tQUICOptions        V2RayQUICOptions        `json:"-"`
+\tGRPCOptions        V2RayGRPCOptions        `json:"-"`
+\tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+''',
+              '''\tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
+\tHTTPOptions        V2RayHTTPOptions        `json:"-"`
+\tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+\tQUICOptions        V2RayQUICOptions        `json:"-"`
+\tGRPCOptions        V2RayGRPCOptions        `json:"-"`
+\tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+\tXHTTPOptions       V2RayXHTTPOptions       `json:"-"`
+''',
           )
-
 
           replace_exact(
               "option/v2ray_transport.go",
-
-              '''type _V2RayTransportOptions struct {
-          \tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
-          \tHTTPOptions        V2RayHTTPOptions        `json:"-"`
-          \tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
-          \tQUICOptions        V2RayQUICOptions        `json:"-"`
-          \tGRPCOptions        V2RayGRPCOptions        `json:"-"`
-          \tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
-          }''',
-
-              '''type _V2RayTransportOptions struct {
-          \tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
-          \tHTTPOptions        V2RayHTTPOptions        `json:"-"`
-          \tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
-          \tQUICOptions        V2RayQUICOptions        `json:"-"`
-          \tGRPCOptions        V2RayGRPCOptions        `json:"-"`
-          \tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
-          \tXHTTPOptions       xhttp.Options           `json:"-"`
-          }''',
-
-              "Add XHTTPOptions"
-          )
-
-
-          replace_exact(
-              "option/v2ray_transport.go",
-
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\tv = o.HTTPUpgradeOptions
-          \tcase "":
-          ''',
-
+\t\tv = o.HTTPUpgradeOptions
+\tcase "":
+''',
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\tv = o.HTTPUpgradeOptions
-          \tcase C.V2RayTransportTypeXHTTP:
-          \t\tv = o.XHTTPOptions
-          \tcase "":
-          ''',
-
-              "Add XHTTP MarshalJSON case"
+\t\tv = o.HTTPUpgradeOptions
+\tcase C.V2RayTransportTypeXHTTP:
+\t\tv = o.XHTTPOptions
+\tcase "":
+''',
           )
-
 
           replace_exact(
               "option/v2ray_transport.go",
-
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\tv = &o.HTTPUpgradeOptions
-          \tdefault:
-          ''',
-
+\t\tv = &o.HTTPUpgradeOptions
+\tdefault:
+''',
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\tv = &o.HTTPUpgradeOptions
-          \tcase C.V2RayTransportTypeXHTTP:
-          \t\tv = &o.XHTTPOptions
-          \tdefault:
-          ''',
-
-              "Add XHTTP UnmarshalJSON case"
+\t\tv = &o.HTTPUpgradeOptions
+\tcase C.V2RayTransportTypeXHTTP:
+\t\tv = &o.XHTTPOptions
+\tdefault:
+''',
           )
-
 
           replace_exact(
               "option/v2ray_transport.go",
-
               '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
-          \t\t}, nil)
-          ''',
-
+\t\t}, nil)
+''',
               '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
-          \t\t\t{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[xhttp.Options]()},
-          \t\t}, nil)
-          ''',
-
-              "Add XHTTP schema"
+\t\t\t{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
+\t\t}, nil)
+''',
           )
 
+          # Add complete XHTTP option mirror before V2RayHTTPUpgradeOptions.
+          replace_exact(
+              "option/v2ray_transport.go",
+              '''type V2RayHTTPUpgradeOptions struct {
+\tHost    string               `json:"host,omitempty"`
+\tPath    string               `json:"path,omitempty"`
+\tHeaders badoption.HTTPHeader `json:"headers,omitempty"`
+}
+''',
+              '''// V2RayXHTTPRange mirrors sing-xhttp/xhttp.Range.
+type V2RayXHTTPRange struct {
+\tFrom int32 `json:"from,omitempty"`
+\tTo   int32 `json:"to,omitempty"`
+}
 
-          # ============================================================
-          # transport/v2ray/transport.go
-          # ============================================================
+// V2RayXHTTPDownloadConfig mirrors sing-xhttp/xhttp.DownloadConfig.
+type V2RayXHTTPDownloadConfig struct {
+\tHost string `json:"host,omitempty"`
+\tPath string `json:"path,omitempty"`
+}
+
+// V2RayXHTTPXmuxConfig mirrors sing-xhttp/xhttp.XmuxConfig.
+type V2RayXHTTPXmuxConfig struct {
+\tMaxConcurrency   *V2RayXHTTPRange `json:"max_concurrency,omitempty"`
+\tMaxConnections   *V2RayXHTTPRange `json:"max_connections,omitempty"`
+\tCMaxReuseTimes   *V2RayXHTTPRange `json:"c_max_reuse_times,omitempty"`
+\tHMaxRequestTimes *V2RayXHTTPRange `json:"h_max_request_times,omitempty"`
+\tHMaxReusableSecs *V2RayXHTTPRange `json:"h_max_reusable_secs,omitempty"`
+\tHKeepAlivePeriod int32            `json:"h_keep_alive_period,omitempty"`
+}
+
+// V2RayXHTTPOptions mirrors sing-xhttp/xhttp.Options.
+type V2RayXHTTPOptions struct {
+\tMode    string               `json:"mode,omitempty"`
+\tHost    string               `json:"host,omitempty"`
+\tPath    string               `json:"path,omitempty"`
+\tMethod  string               `json:"method,omitempty"`
+\tHeaders badoption.HTTPHeader `json:"headers,omitempty"`
+
+\tNoGRPCHeader bool `json:"no_grpc_header,omitempty"`
+\tNoSSEHeader  bool `json:"no_sse_header,omitempty"`
+
+\tXPaddingBytes        *V2RayXHTTPRange `json:"x_padding_bytes,omitempty"`
+\tScMaxEachPostBytes   *V2RayXHTTPRange `json:"sc_max_each_post_bytes,omitempty"`
+\tScMaxBufferedPosts   int32            `json:"sc_max_buffered_posts,omitempty"`
+\tScMinPostsIntervalMs *V2RayXHTTPRange `json:"sc_min_posts_interval_ms,omitempty"`
+\tScStreamUpServerSecs *V2RayXHTTPRange `json:"sc_stream_up_server_secs,omitempty"`
+
+\tXPaddingObfsMode  bool   `json:"x_padding_obfs_mode,omitempty"`
+\tXPaddingPlacement string `json:"x_padding_placement,omitempty"`
+\tXPaddingKey       string `json:"x_padding_key,omitempty"`
+\tXPaddingHeader    string `json:"x_padding_header,omitempty"`
+\tXPaddingMethod    string `json:"x_padding_method,omitempty"`
+
+\tSessionPlacement string `json:"session_placement,omitempty"`
+\tSessionKey       string `json:"session_key,omitempty"`
+\tSeqPlacement     string `json:"seq_placement,omitempty"`
+\tSeqKey           string `json:"seq_key,omitempty"`
+
+\tUplinkDataPlacement string            `json:"uplink_data_placement,omitempty"`
+\tUplinkDataKey       string            `json:"uplink_data_key,omitempty"`
+\tUplinkChunkSize     *V2RayXHTTPRange  `json:"uplink_chunk_size,omitempty"`
+
+\tSessionIDTable  string            `json:"session_id_table,omitempty"`
+\tSessionIDLength *V2RayXHTTPRange  `json:"session_id_length,omitempty"`
+
+\tServerMaxHeaderBytes int32 `json:"server_max_header_bytes,omitempty"`
+
+\tDownloadSettings *V2RayXHTTPDownloadConfig `json:"download_settings,omitempty"`
+\tXmux             *V2RayXHTTPXmuxConfig      `json:"xmux,omitempty"`
+}
+
+type V2RayHTTPUpgradeOptions struct {
+\tHost    string               `json:"host,omitempty"`
+\tPath    string               `json:"path,omitempty"`
+\tHeaders badoption.HTTPHeader `json:"headers,omitempty"`
+}
+''',
+          )
+
+          # ------------------------------------------------------------
+          # 3. transport/v2ray/transport.go
+          # ------------------------------------------------------------
 
           replace_exact(
               "transport/v2ray/transport.go",
-
               '''\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"
-          \t"github.com/sagernet/sing-box/transport/v2raywebsocket"
-          ''',
-
+\t"github.com/sagernet/sing-box/transport/v2raywebsocket"
+''',
               '''\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"
-          \t"github.com/justinwoo280/sing-xhttp/xhttp"
-          \t"github.com/sagernet/sing-box/transport/v2raywebsocket"
-          ''',
-
-              "Add sing-xhttp transport import"
+\t"github.com/sagernet/sing-box/transport/v2raywebsocket"
+\t"github.com/justinwoo280/sing-xhttp/xhttp"
+''',
           )
-
 
           replace_exact(
               "transport/v2ray/transport.go",
-
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
-          \tdefault:
-          ''',
-
+\t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
+\tdefault:
+''',
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
-          \tcase C.V2RayTransportTypeXHTTP:
-          \t\treturn xhttp.NewServer(ctx, logger, options.XHTTPOptions, tlsConfig, handler)
-          \tdefault:
-          ''',
-
-              "Add XHTTP server"
+\t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
+\tcase C.V2RayTransportTypeXHTTP:
+\t\treturn NewXHTTPServer(ctx, logger, options.XHTTPOptions, tlsConfig, handler)
+\tdefault:
+''',
           )
-
 
           replace_exact(
               "transport/v2ray/transport.go",
-
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
-          \tdefault:
-          ''',
-
+\t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+\tdefault:
+''',
               '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-          \t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
-          \tcase C.V2RayTransportTypeXHTTP:
-          \t\treturn xhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
-          \tdefault:
-          ''',
-
-              "Add XHTTP client"
+\t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+\tcase C.V2RayTransportTypeXHTTP:
+\t\treturn NewXHTTPClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
+\tdefault:
+''',
           )
 
+          # ------------------------------------------------------------
+          # 4. transport/v2ray/xhttp.go
+          #
+          # The xhttp package intentionally mirrors sing-box's interfaces.
+          # The bridge converts the option structure using JSON tags so that
+          # all v0.1.6 fields remain synchronized without manual field drift.
+          # ------------------------------------------------------------
+
+          create_exact(
+              "transport/v2ray/xhttp.go",
+              r'''package v2ray
+
+import (
+	"context"
+
+	"github.com/justinwoo280/sing-xhttp/xhttp"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/option"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/logger"
+)
+
+func convertXHTTPOptions(options option.V2RayXHTTPOptions) (xhttp.Options, error) {
+	var result xhttp.Options
+
+	bytes, err := json.Marshal(options)
+	if err != nil {
+		return result, err
+	}
+
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return result, err
+	}
+
+	return result, nil
+}
+
+func NewXHTTPServer(
+	ctx context.Context,
+	logger logger.ContextLogger,
+	options option.V2RayXHTTPOptions,
+	tlsConfig tls.ServerConfig,
+	handler adapter.V2RayServerTransportHandler,
+) (adapter.V2RayServerTransport, error) {
+	xhttpOptions, err := convertXHTTPOptions(options)
+	if err != nil {
+		return nil, err
+	}
+
+	return xhttp.NewServer(
+		ctx,
+		logger,
+		xhttpOptions,
+		tlsConfig,
+		handler,
+	)
+}
+
+func NewXHTTPClient(
+	ctx context.Context,
+	dialer N.Dialer,
+	serverAddr M.Socksaddr,
+	options option.V2RayXHTTPOptions,
+	tlsConfig tls.Config,
+) (adapter.V2RayClientTransport, error) {
+	xhttpOptions, err := convertXHTTPOptions(options)
+	if err != nil {
+		return nil, err
+	}
+
+	return xhttp.NewClient(
+		ctx,
+		dialer,
+		serverAddr,
+		xhttpOptions,
+		tlsConfig,
+	)
+}
+''',
+          )
 
           print()
-          print("==========================================")
-          print("All source replacements completed.")
-          print("==========================================")
+          print("All XHTTP source patches applied successfully.")
           PY
 
+      - name: Verify patched source
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Format modified Go files
+          echo "==> Checking XHTTP constant..."
+
+          grep -Eq \
+            'V2RayTransportTypeXHTTP[[:space:]]*=[[:space:]]*"xhttp"' \
+            constant/v2ray.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking V2Ray XHTTP options..."
+
+          grep -Eq \
+            'XHTTPOptions[[:space:]]+V2RayXHTTPOptions' \
+            option/v2ray_transport.go
+
+          grep -Eq \
+            'type V2RayXHTTPOptions struct' \
+            option/v2ray_transport.go
+
+          grep -Eq \
+            'type V2RayXHTTPRange struct' \
+            option/v2ray_transport.go
+
+          grep -Eq \
+            'type V2RayXHTTPXmuxConfig struct' \
+            option/v2ray_transport.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking JSON marshal/unmarshal cases..."
+
+          grep -Eq \
+            'case C\.V2RayTransportTypeXHTTP:' \
+            option/v2ray_transport.go
+
+          COUNT="$(grep -Ec 'case C\.V2RayTransportTypeXHTTP:' option/v2ray_transport.go)"
+
+          if [ "${COUNT}" -ne 2 ]; then
+            echo "ERROR: expected 2 XHTTP JSON cases, found ${COUNT}"
+            exit 1
+          fi
+
+          echo "OK"
+
+          echo
+          echo "==> Checking schema registration..."
+
+          grep -Eq \
+            'reflect\.TypeFor\[V2RayXHTTPOptions\]\(\)' \
+            option/v2ray_transport.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking server dispatcher..."
+
+          grep -Eq \
+            'return NewXHTTPServer\(ctx, logger, options\.XHTTPOptions, tlsConfig, handler\)' \
+            transport/v2ray/transport.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking client dispatcher..."
+
+          grep -Eq \
+            'return NewXHTTPClient\(ctx, dialer, serverAddr, options\.XHTTPOptions, tlsConfig\)' \
+            transport/v2ray/transport.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking bridge..."
+
+          test -f transport/v2ray/xhttp.go
+
+          grep -Eq \
+            'github\.com/justinwoo280/sing-xhttp/xhttp' \
+            transport/v2ray/xhttp.go
+
+          grep -Eq \
+            'func NewXHTTPServer\(' \
+            transport/v2ray/xhttp.go
+
+          grep -Eq \
+            'func NewXHTTPClient\(' \
+            transport/v2ray/xhttp.go
+
+          grep -Eq \
+            'xhttp\.NewServer\(' \
+            transport/v2ray/xhttp.go
+
+          grep -Eq \
+            'xhttp\.NewClient\(' \
+            transport/v2ray/xhttp.go
+
+          echo "OK"
+
+          echo
+          echo "==> Checking complete XHTTP option fields..."
+
+          for field in \
+            Mode \
+            Host \
+            Path \
+            Method \
+            Headers \
+            NoGRPCHeader \
+            NoSSEHeader \
+            XPaddingBytes \
+            ScMaxEachPostBytes \
+            ScMaxBufferedPosts \
+            ScMinPostsIntervalMs \
+            ScStreamUpServerSecs \
+            XPaddingObfsMode \
+            XPaddingPlacement \
+            XPaddingKey \
+            XPaddingHeader \
+            XPaddingMethod \
+            SessionPlacement \
+            SessionKey \
+            SeqPlacement \
+            SeqKey \
+            UplinkDataPlacement \
+            UplinkDataKey \
+            UplinkChunkSize \
+            SessionIDTable \
+            SessionIDLength \
+            ServerMaxHeaderBytes \
+            DownloadSettings \
+            Xmux
+          do
+            grep -Eq \
+              "^[[:space:]]*${field}[[:space:]]+" \
+              option/v2ray_transport.go || {
+                echo "ERROR: missing XHTTP field: ${field}"
+                exit 1
+              }
+          done
+
+          echo "All XHTTP fields verified."
+
+      - name: Format patched Go files
         shell: bash
         run: |
           set -euo pipefail
@@ -361,47 +683,54 @@ jobs:
           gofmt -w \
             constant/v2ray.go \
             option/v2ray_transport.go \
-            transport/v2ray/transport.go
+            transport/v2ray/transport.go \
+            transport/v2ray/xhttp.go
 
-
-      - name: Verify XHTTP modifications
+      - name: Verify formatting did not remove XHTTP integration
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking XHTTP constant..."
-          grep -F \
-            'V2RayTransportTypeXHTTP = "xhttp"' \
+          grep -Eq \
+            'V2RayTransportTypeXHTTP[[:space:]]*=[[:space:]]*"xhttp"' \
             constant/v2ray.go
 
-          echo "Checking XHTTP options..."
-          grep -F \
-            'XHTTPOptions       xhttp.Options' \
+          grep -Eq \
+            'XHTTPOptions[[:space:]]+V2RayXHTTPOptions' \
             option/v2ray_transport.go
 
-          echo "Checking XHTTP JSON handling..."
-          grep -F \
-            'case C.V2RayTransportTypeXHTTP:' \
+          grep -Eq \
+            'reflect\.TypeFor\[V2RayXHTTPOptions\]\(\)' \
             option/v2ray_transport.go
 
-          echo "Checking XHTTP schema..."
-          grep -F \
-            'reflect.TypeFor[xhttp.Options]()' \
-            option/v2ray_transport.go
-
-          echo "Checking XHTTP server..."
-          grep -F \
-            'xhttp.NewServer' \
+          grep -Eq \
+            'return NewXHTTPServer\(ctx, logger, options\.XHTTPOptions, tlsConfig, handler\)' \
             transport/v2ray/transport.go
 
-          echo "Checking XHTTP client..."
-          grep -F \
-            'xhttp.NewClient' \
+          grep -Eq \
+            'return NewXHTTPClient\(ctx, dialer, serverAddr, options\.XHTTPOptions, tlsConfig\)' \
             transport/v2ray/transport.go
 
-          echo
-          echo "All XHTTP integration points verified."
+          test -f transport/v2ray/xhttp.go
 
+          echo "Post-gofmt XHTTP integration verified."
+
+      - name: Verify sing-xhttp dependency
+        shell: bash
+        env:
+          XHTTP_VERSION: ${{ needs.get-version.outputs.xhttp_version }}
+        run: |
+          set -euo pipefail
+
+          RESOLVED="$(go list -m -f '{{.Version}}' github.com/justinwoo280/sing-xhttp)"
+
+          echo "Expected: ${XHTTP_VERSION}"
+          echo "Resolved: ${RESOLVED}"
+
+          if [ "${RESOLVED}" != "${XHTTP_VERSION}" ]; then
+            echo "ERROR: unexpected sing-xhttp version"
+            exit 1
+          fi
 
       - name: Download Go dependencies
         shell: bash
@@ -410,130 +739,159 @@ jobs:
 
           go mod download
 
+      - name: Verify patched package compilation
+        shell: bash
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
 
-      - name: Read official build configuration
-        id: build-config
+          echo "Compiling transport/v2ray..."
+
+          go test \
+            -run '^$' \
+            ./transport/v2ray
+
+      - name: Verify XHTTP option package compilation
+        shell: bash
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          echo "Compiling option package..."
+
+          go test \
+            -run '^$' \
+            ./option
+
+      - name: Verify official build configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -s release/DEFAULT_BUILD_TAGS ]; then
-            echo "ERROR: release/DEFAULT_BUILD_TAGS is empty."
-            exit 1
-          fi
+          test -s release/DEFAULT_BUILD_TAGS
+          test -s release/LDFLAGS
 
-          if [ ! -s release/LDFLAGS ]; then
-            echo "ERROR: release/LDFLAGS is empty."
-            exit 1
-          fi
-
-          OFFICIAL_TAGS="$(
-            tr '\n' ',' < release/DEFAULT_BUILD_TAGS |
-            sed 's/,$//'
-          )"
-
-          if [ -z "$OFFICIAL_TAGS" ]; then
-            echo "ERROR: Failed to read official build tags."
-            exit 1
-          fi
+          OFFICIAL_TAGS="$(cat release/DEFAULT_BUILD_TAGS)"
+          OFFICIAL_LDFLAGS="$(cat release/LDFLAGS)"
 
           echo "Official build tags:"
-          echo "$OFFICIAL_TAGS"
+          echo "${OFFICIAL_TAGS}"
 
           echo
-          echo "Official LDFLAGS:"
-          cat release/LDFLAGS
+          echo "Official linker flags:"
+          echo "${OFFICIAL_LDFLAGS}"
 
           echo
-          echo "official_tags=${OFFICIAL_TAGS}" >> "$GITHUB_OUTPUT"
+          echo "Required additional tags:"
+          echo "with_purego"
+          echo "with_v2ray_api"
 
+      - name: Set build tags and linker flags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OFFICIAL_TAGS="$(cat release/DEFAULT_BUILD_TAGS)"
+
+          BUILD_TAGS="${OFFICIAL_TAGS},with_purego,with_v2ray_api"
+
+          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+
+          echo "BUILD_TAGS=${BUILD_TAGS}" >> "${GITHUB_ENV}"
+          echo "LDFLAGS_SHARED=${LDFLAGS_SHARED}" >> "${GITHUB_ENV}"
+
+          echo "BUILD_TAGS=${BUILD_TAGS}"
+          echo "LDFLAGS_SHARED=${LDFLAGS_SHARED}"
 
       - name: Build sing-box
         shell: bash
         env:
-          OFFICIAL_VERSION: ${{ needs.get-version.outputs.upstream_version }}
-          OFFICIAL_TAGS: ${{ steps.build-config.outputs.official_tags }}
-          TARGET_ARCH: ${{ matrix.arch }}
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.get-version.outputs.sing_box_version }}
         run: |
           set -euo pipefail
 
-          TAGS="${OFFICIAL_TAGS},with_purego,with_v2ray_api"
+          mkdir -p dist
 
-          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+          echo "Building sing-box ${VERSION}"
+          echo "GOOS=${GOOS}"
+          echo "GOARCH=${GOARCH}"
+          echo "CGO_ENABLED=${CGO_ENABLED}"
+          echo "BUILD_TAGS=${BUILD_TAGS}"
 
-          mkdir -p release/package
-
-          echo "=========================================="
-          echo "Build configuration"
-          echo "=========================================="
-          echo "sing-box : v${OFFICIAL_VERSION}"
-          echo "XHTTP    : ${{ needs.get-version.outputs.xhttp_version }}"
-          echo "GOOS     : linux"
-          echo "GOARCH   : ${TARGET_ARCH}"
-          echo "CGO      : 0"
-          echo "Tags     : ${TAGS}"
-          echo "=========================================="
-
-
-          GOOS=linux \
-          GOARCH="${TARGET_ARCH}" \
-          CGO_ENABLED=0 \
           go build \
             -v \
             -trimpath \
-            -o release/package/sing-box \
-            -tags "${TAGS}" \
-            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+            -o dist/sing-box \
+            -tags "${BUILD_TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
 
-
-          chmod +x release/package/sing-box
-
-
-      - name: Verify binary
+      - name: Verify built binary
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.get-version.outputs.upstream_version }}
+          VERSION: ${{ needs.get-version.outputs.sing_box_version }}
         run: |
           set -euo pipefail
 
-          test -x release/package/sing-box
+          test -x dist/sing-box
 
-          echo "==> Binary version:"
-          release/package/sing-box version
+          file dist/sing-box
 
-          release/package/sing-box version |
-            grep -F "version ${EXPECTED_VERSION}"
+          echo
+          echo "Binary version:"
+          dist/sing-box version
 
-          echo "Binary version verification: OK"
+          echo
+          echo "Expected version:"
+          echo "${VERSION}"
 
+          VERSION_OUTPUT="$(dist/sing-box version)"
 
-      - name: Check XHTTP configuration
+          if ! printf '%s\n' "${VERSION_OUTPUT}" | grep -Fq "${VERSION}"; then
+            echo "ERROR: built binary reports unexpected version"
+            exit 1
+          fi
+
+      - name: Generate XHTTP validation configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          cat > release/xhttp-test.json <<'JSON'
+          cat > /tmp/xhttp-test.json <<'JSON'
           {
-            "log": {
-              "level": "error"
-            },
             "inbounds": [
               {
                 "type": "vless",
                 "tag": "xhttp-in",
                 "listen": "127.0.0.1",
-                "listen_port": 18443,
+                "listen_port": 18080,
                 "users": [
                   {
-                    "name": "xhttp-test",
-                    "uuid": "8a21b0ab-c9a6-4763-bbc5-9a170a8a1869"
+                    "uuid": "00000000-0000-4000-8000-000000000001"
                   }
                 ],
                 "transport": {
                   "type": "xhttp",
-                  "mode": "auto",
-                  "path": "/xhttp"
+                  "mode": "packet-up",
+                  "path": "/xhttp",
+                  "host": "example.com",
+                  "x_padding_bytes": {
+                    "from": 100,
+                    "to": 1000
+                  },
+                  "sc_max_each_post_bytes": {
+                    "from": 1000000,
+                    "to": 1000000
+                  }
                 }
               }
             ],
@@ -542,178 +900,253 @@ jobs:
                 "type": "vless",
                 "tag": "xhttp-out",
                 "server": "127.0.0.1",
-                "server_port": 18443,
-                "uuid": "8a21b0ab-c9a6-4763-bbc5-9a170a8a1869",
+                "server_port": 18080,
+                "uuid": "00000000-0000-4000-8000-000000000001",
                 "transport": {
                   "type": "xhttp",
-                  "mode": "auto",
-                  "path": "/xhttp"
+                  "mode": "packet-up",
+                  "path": "/xhttp",
+                  "host": "example.com",
+                  "x_padding_bytes": {
+                    "from": 100,
+                    "to": 1000
+                  },
+                  "sc_max_each_post_bytes": {
+                    "from": 1000000,
+                    "to": 1000000
+                  }
                 }
-              },
-              {
-                "type": "direct",
-                "tag": "direct"
               }
             ]
           }
           JSON
 
-          release/package/sing-box \
-            check \
-            -c release/xhttp-test.json
+          echo "Generated XHTTP validation configuration:"
+          cat /tmp/xhttp-test.json
 
-          echo "XHTTP configuration check: OK"
-
-
-      - name: Generate schema and verify XHTTP
+      - name: Validate XHTTP configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          release/package/sing-box \
-            generate schema \
-            > release/schema.json
+          dist/sing-box check \
+            -c /tmp/xhttp-test.json
 
-          grep -F '"xhttp"' release/schema.json
+      - name: Generate XHTTP feature validation configuration
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "XHTTP schema verification: OK"
+          cat > /tmp/xhttp-feature-test.json <<'JSON'
+          {
+            "inbounds": [
+              {
+                "type": "vless",
+                "tag": "xhttp-feature-in",
+                "listen": "127.0.0.1",
+                "listen_port": 18081,
+                "users": [
+                  {
+                    "uuid": "00000000-0000-4000-8000-000000000002"
+                  }
+                ],
+                "transport": {
+                  "type": "xhttp",
+                  "mode": "stream-one",
+                  "path": "/xhttp",
+                  "session_placement": "header",
+                  "session_key": "X-Sid",
+                  "seq_placement": "header",
+                  "seq_key": "X-Sq",
+                  "x_padding_obfs_mode": true,
+                  "x_padding_placement": "header",
+                  "x_padding_header": "X-Padding",
+                  "x_padding_method": "tokenish",
+                  "uplink_data_placement": "body",
+                  "session_id_table": "Base62",
+                  "session_id_length": {
+                    "from": 16,
+                    "to": 16
+                  },
+                  "xmux": {
+                    "max_concurrency": {
+                      "from": 16,
+                      "to": 16
+                    },
+                    "max_connections": {
+                      "from": 4,
+                      "to": 4
+                    },
+                    "c_max_reuse_times": {
+                      "from": 64,
+                      "to": 128
+                    },
+                    "h_max_request_times": {
+                      "from": 600,
+                      "to": 900
+                    },
+                    "h_max_reusable_secs": {
+                      "from": 1800,
+                      "to": 3600
+                    }
+                  }
+                }
+              }
+            ]
+          }
+          JSON
 
+      - name: Validate XHTTP extended configuration
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Create fixed release archive
+          dist/sing-box check \
+            -c /tmp/xhttp-feature-test.json
+
+      - name: Package release artifact
         shell: bash
         env:
-          TARGET_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.get-version.outputs.sing_box_version }}
+          XHTTP_VERSION: ${{ needs.get-version.outputs.xhttp_version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
 
           mkdir -p release
 
-          case "$TARGET_ARCH" in
-            amd64)
-              ARCHIVE="release/sing-box-linux-amd64.tar.gz"
-              ;;
-            arm64)
-              ARCHIVE="release/sing-box-linux-arm64.tar.gz"
-              ;;
-            *)
-              echo "ERROR: Unsupported architecture: $TARGET_ARCH"
-              exit 1
-              ;;
-          esac
+          PACKAGE_DIR="sing-box-${VERSION}-linux-${ARCH}"
+
+          rm -rf "${PACKAGE_DIR}"
+          mkdir -p "${PACKAGE_DIR}"
+
+          cp dist/sing-box "${PACKAGE_DIR}/sing-box"
+
+          chmod 0755 "${PACKAGE_DIR}/sing-box"
+
+          ARCHIVE="release/sing-box-linux-${ARCH}.tar.gz"
 
           tar \
-            -C release/package \
-            -czf "$ARCHIVE" \
+            -czf "${ARCHIVE}" \
+            -C "${PACKAGE_DIR}" \
             sing-box
 
-          test -f "$ARCHIVE"
+          echo "Created:"
+          ls -lh "${ARCHIVE}"
 
           echo
-          echo "Created archive:"
-          ls -lh "$ARCHIVE"
+          echo "Archive content:"
+          tar -tzf "${ARCHIVE}"
 
           echo
-          echo "Archive contents:"
-          tar -tzf "$ARCHIVE"
+          echo "Archive binary:"
+          if [ "$(tar -tzf "${ARCHIVE}" | tr -d '\r')" != "sing-box" ]; then
+            echo "ERROR: archive must contain exactly one file named sing-box"
+            exit 1
+          fi
 
+          echo
+          echo "Metadata:"
+          echo "sing-box=${VERSION}"
+          echo "sing-xhttp=${XHTTP_VERSION}"
+          echo "linux=${ARCH}"
 
-      - name: Verify fixed archive
+      - name: Generate checksum
         shell: bash
         env:
-          TARGET_ARCH: ${{ matrix.arch }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
 
-          case "$TARGET_ARCH" in
-            amd64)
-              ARCHIVE="release/sing-box-linux-amd64.tar.gz"
-              ;;
-            arm64)
-              ARCHIVE="release/sing-box-linux-arm64.tar.gz"
-              ;;
-            *)
-              echo "ERROR: Unsupported architecture."
-              exit 1
-              ;;
-          esac
+          cd release
 
-          test -f "$ARCHIVE"
+          sha256sum \
+            "sing-box-linux-${ARCH}.tar.gz" \
+            > "sing-box-linux-${ARCH}.sha256"
 
-          tar -tzf "$ARCHIVE" |
-            grep -Fx "sing-box"
+          cat "sing-box-linux-${ARCH}.sha256"
 
-          echo "Archive verification: OK"
-
-
-      - name: Upload amd64 archive
-        if: matrix.arch == 'amd64'
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sing-box-linux-amd64
-          path: release/sing-box-linux-amd64.tar.gz
+          name: sing-box-linux-${{ matrix.arch }}
+          path: |
+            release/sing-box-linux-${{ matrix.arch }}.tar.gz
+            release/sing-box-linux-${{ matrix.arch }}.sha256
           if-no-files-found: error
-
-
-      - name: Upload arm64 archive
-        if: matrix.arch == 'arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: sing-box-linux-arm64
-          path: release/sing-box-linux-arm64.tar.gz
-          if-no-files-found: error
+          retention-days: 7
 
 
   release:
+    name: Create GitHub Release
     needs:
       - get-version
       - build
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Download amd64 archive
+      - name: Download amd64 artifact
         uses: actions/download-artifact@v4
         with:
           name: sing-box-linux-amd64
           path: release
 
-
-      - name: Download arm64 archive
+      - name: Download arm64 artifact
         uses: actions/download-artifact@v4
         with:
           name: sing-box-linux-arm64
           path: release
 
-
-      - name: Verify final release files
+      - name: Verify release files
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking final release files..."
-
           test -f release/sing-box-linux-amd64.tar.gz
           test -f release/sing-box-linux-arm64.tar.gz
 
-          echo
-          echo "Files:"
-          ls -lh \
-            release/sing-box-linux-amd64.tar.gz \
-            release/sing-box-linux-arm64.tar.gz
+          test -f release/sing-box-linux-amd64.sha256
+          test -f release/sing-box-linux-arm64.sha256
 
+          echo "Release artifacts:"
+          ls -lh release/
 
           echo
           echo "amd64 archive:"
           tar -tzf release/sing-box-linux-amd64.tar.gz
 
-
           echo
           echo "arm64 archive:"
           tar -tzf release/sing-box-linux-arm64.tar.gz
 
+          AMD64_COUNT="$(tar -tzf release/sing-box-linux-amd64.tar.gz | wc -l)"
+          ARM64_COUNT="$(tar -tzf release/sing-box-linux-arm64.tar.gz | wc -l)"
 
-          echo
-          echo "Generating SHA256SUMS..."
+          if [ "${AMD64_COUNT}" -ne 1 ]; then
+            echo "ERROR: amd64 archive must contain exactly one file"
+            exit 1
+          fi
+
+          if [ "${ARM64_COUNT}" -ne 1 ]; then
+            echo "ERROR: arm64 archive must contain exactly one file"
+            exit 1
+          fi
+
+          if [ "$(tar -tzf release/sing-box-linux-amd64.tar.gz)" != "sing-box" ]; then
+            echo "ERROR: amd64 archive contains unexpected path"
+            exit 1
+          fi
+
+          if [ "$(tar -tzf release/sing-box-linux-arm64.tar.gz)" != "sing-box" ]; then
+            echo "ERROR: arm64 archive contains unexpected path"
+            exit 1
+          fi
+
+      - name: Create combined SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
 
           cd release
 
@@ -722,43 +1155,60 @@ jobs:
             sing-box-linux-arm64.tar.gz \
             > SHA256SUMS
 
+          echo "SHA256SUMS:"
           cat SHA256SUMS
-
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-${{ needs.get-version.outputs.xhttp_version }}
-          name: sing-box v${{ needs.get-version.outputs.upstream_version }} + XHTTP ${{ needs.get-version.outputs.xhttp_version }}
-          make_latest: false
-          generate_release_notes: false
-
+          tag_name: ${{ needs.get-version.outputs.sing_box_version }}-xhttp
+          name: sing-box ${{ needs.get-version.outputs.sing_box_version }} + sing-xhttp ${{ needs.get-version.outputs.xhttp_version }}
           body: |
-            Based on official SagerNet/sing-box.
+            ## Build
 
-            Versions:
-            - sing-box: v${{ needs.get-version.outputs.upstream_version }}
-            - sing-xhttp: ${{ needs.get-version.outputs.xhttp_version }}
+            - sing-box: `${{ needs.get-version.outputs.sing_box_version }}`
+            - sing-xhttp: `${{ needs.get-version.outputs.xhttp_version }}`
 
-            XHTTP:
-            - V2Ray Transport XHTTP
-            - inbound / server
-            - outbound / client
-            - transport.type = xhttp
+            ## Platforms
 
-            Build tags:
-            - official release/DEFAULT_BUILD_TAGS
-            - with_purego
-            - with_v2ray_api
-
-            Linker flags:
-            - official release/LDFLAGS
-
-            Architectures:
             - Linux amd64
             - Linux arm64
 
+            ## XHTTP
+
+            XHTTP is integrated into the V2RayTransport interface and supports both:
+
+            - inbound / server
+            - outbound / client
+
+            The integration includes:
+
+            - XHTTP transport type registration
+            - JSON marshal / unmarshal
+            - schema registration
+            - complete XHTTP option mirror
+            - server bridge
+            - client bridge
+
+            ## Build configuration
+
+            Official sing-box release build tags are preserved and the following tags are additionally enabled:
+
+            - `with_purego`
+            - `with_v2ray_api`
+
+            Official `release/LDFLAGS` is preserved.
+
+            ## Checksums
+
+            See `SHA256SUMS`.
           files: |
             release/sing-box-linux-amd64.tar.gz
             release/sing-box-linux-arm64.tar.gz
+            release/sing-box-linux-amd64.sha256
+            release/sing-box-linux-arm64.sha256
             release/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          draft: false
+          prerelease: false
