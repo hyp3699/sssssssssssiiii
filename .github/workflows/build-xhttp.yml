@@ -54,6 +54,11 @@ jobs:
           '
           )"
 
+          if [ -z "${SING_BOX_VERSION}" ]; then
+            echo "ERROR: Unable to resolve sing-box version"
+            exit 1
+          fi
+
           echo "sing-box version: ${SING_BOX_VERSION}"
 
           echo "Resolving latest sing-xhttp tag..."
@@ -90,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: true
+      fail-fast: false
 
       matrix:
         include:
@@ -101,6 +106,10 @@ jobs:
             goarch: arm64
 
     steps:
+      # ============================================================
+      # Checkout
+      # ============================================================
+
       - name: Checkout official sing-box
         uses: actions/checkout@v5
         with:
@@ -130,6 +139,10 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
+      # Go
+      # ============================================================
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -141,10 +154,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Go:"
           go version
+
+          echo
+          echo "Host environment:"
           go env GOOS GOARCH CGO_ENABLED
-          echo "sing-box: ${{ needs.get-version.outputs.sing_box_version }}"
+
+          echo
+          echo "Target:"
+          echo "Architecture: ${{ matrix.arch }}"
+          echo "GOARCH:       ${{ matrix.goarch }}"
+
+          echo
+          echo "Versions:"
+          echo "sing-box:  ${{ needs.get-version.outputs.sing_box_version }}"
           echo "sing-xhttp: ${{ needs.get-version.outputs.xhttp_version }}"
+
+      # ============================================================
+      # Add sing-xhttp
+      # ============================================================
 
       - name: Add sing-xhttp dependency
         env:
@@ -152,6 +181,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Adding sing-xhttp ${XHTTP_VERSION}..."
 
           go mod edit \
             -require="github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
@@ -172,6 +203,10 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
+      # Patch source
+      # ============================================================
+
       - name: Patch source
         shell: bash
         run: |
@@ -180,12 +215,6 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           from textwrap import dedent
-
-          def read(path):
-              return Path(path).read_text()
-
-          def write(path, content):
-              Path(path).write_text(content)
 
           def replace_exact(path, old, new, expected=1):
               p = Path(path)
@@ -247,7 +276,10 @@ jobs:
               '\tXHTTPOptions       V2RayXHTTPOptions       `json:"-"`\n',
           )
 
+          # ------------------------------------------------------------
           # MarshalJSON
+          # ------------------------------------------------------------
+
           replace_exact(
               "option/v2ray_transport.go",
               '\tcase C.V2RayTransportTypeHTTPUpgrade:\n'
@@ -260,7 +292,10 @@ jobs:
               '\tcase "":\n',
           )
 
+          # ------------------------------------------------------------
           # UnmarshalJSON
+          # ------------------------------------------------------------
+
           replace_exact(
               "option/v2ray_transport.go",
               '\tcase C.V2RayTransportTypeHTTPUpgrade:\n'
@@ -273,7 +308,10 @@ jobs:
               '\tdefault:\n',
           )
 
+          # ------------------------------------------------------------
           # Schema
+          # ------------------------------------------------------------
+
           replace_exact(
               "option/v2ray_transport.go",
               '\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},\n'
@@ -477,6 +515,10 @@ jobs:
           print("All source patches completed successfully.")
           PY
 
+      # ============================================================
+      # Format
+      # ============================================================
+
       - name: Format patched source
         shell: bash
         run: |
@@ -487,6 +529,10 @@ jobs:
             option/v2ray_transport.go \
             transport/v2ray/transport.go \
             transport/v2ray/xhttp.go
+
+      # ============================================================
+      # Verify patch
+      # ============================================================
 
       - name: Verify patched source
         shell: bash
@@ -545,26 +591,55 @@ jobs:
             'xhttp\.NewClient\(' \
             transport/v2ray/xhttp.go
 
+          echo
           echo "Patch verification passed."
 
+      # ============================================================
+      # Compile patched packages
+      #
+      # IMPORTANT:
+      # Do NOT set GOARCH here.
+      #
+      # GitHub ubuntu-latest runner is amd64.
+      # go test creates and executes test binaries.
+      # If GOARCH=arm64 is set here, the arm64 test binary
+      # cannot execute on the amd64 runner.
+      # ============================================================
+
       - name: Compile patched packages
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Host toolchain:"
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+
+          echo
+          echo "Downloading modules..."
+
           go mod download
+
+          echo
+          echo "Testing option package..."
 
           go test \
             -run '^$' \
             ./option
 
+          echo
+          echo "Testing transport/v2ray package..."
+
           go test \
             -run '^$' \
             ./transport/v2ray
+
+          echo
+          echo "Patched packages compiled successfully."
+
+      # ============================================================
+      # Official build settings
+      # ============================================================
 
       - name: Read official build settings
         shell: bash
@@ -583,6 +658,10 @@ jobs:
           echo "BUILD_TAGS=${BUILD_TAGS}"
           echo "OFFICIAL_LDFLAGS=${OFFICIAL_LDFLAGS}"
 
+      # ============================================================
+      # Cross compile
+      # ============================================================
+
       - name: Build sing-box
         env:
           GOOS: linux
@@ -595,6 +674,11 @@ jobs:
 
           mkdir -p dist
 
+          echo "Building:"
+          echo "  GOOS=${GOOS}"
+          echo "  GOARCH=${GOARCH}"
+          echo "  CGO_ENABLED=${CGO_ENABLED}"
+
           go build \
             -trimpath \
             -tags "${BUILD_TAGS}" \
@@ -604,7 +688,60 @@ jobs:
 
           test -x dist/sing-box
 
-      - name: Verify binary
+          echo
+          echo "Binary information:"
+          file dist/sing-box
+
+      # ============================================================
+      # Verify binary architecture
+      #
+      # Do NOT execute the binary here for arm64.
+      # ============================================================
+
+      - name: Verify binary architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f dist/sing-box
+
+          BINARY_INFO="$(file dist/sing-box)"
+
+          echo "Expected architecture: ${EXPECTED_ARCH}"
+          echo "Binary:"
+          echo "${BINARY_INFO}"
+
+          case "${EXPECTED_ARCH}" in
+            amd64)
+              echo "${BINARY_INFO}" | grep -Eq \
+                'ELF 64-bit.*x86-64|ELF 64-bit.*Advanced Micro Devices X86-64'
+              ;;
+
+            arm64)
+              echo "${BINARY_INFO}" | grep -Eq \
+                'ELF 64-bit.*ARM aarch64'
+              ;;
+
+            *)
+              echo "ERROR: unsupported architecture: ${EXPECTED_ARCH}"
+              exit 1
+              ;;
+          esac
+
+          echo
+          echo "Binary architecture verification passed."
+
+      # ============================================================
+      # Verify binary version
+      #
+      # Only execute the amd64 binary because the GitHub runner
+      # itself is amd64.
+      # ============================================================
+
+      - name: Verify binary version
+        if: matrix.goarch == 'amd64'
         env:
           VERSION: ${{ needs.get-version.outputs.sing_box_version }}
         shell: bash
@@ -612,11 +749,42 @@ jobs:
           set -euo pipefail
 
           echo "Binary version:"
+
           dist/sing-box version
+
+          echo
+          echo "Checking expected version..."
 
           dist/sing-box version | grep -F "${VERSION}"
 
+          echo
+          echo "Binary version verification passed."
+
+      - name: Verify ARM64 binary without execution
+        if: matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ARM64 binary detected."
+
+          file dist/sing-box
+
+          test -x dist/sing-box
+
+          echo
+          echo "ARM64 binary verification passed."
+          echo "Execution test skipped because the GitHub runner is amd64."
+
+      # ============================================================
+      # Verify XHTTP configuration
+      #
+      # sing-box check requires executing the binary.
+      # Therefore run it only on amd64.
+      # ============================================================
+
       - name: Verify XHTTP configuration
+        if: matrix.goarch == 'amd64'
         shell: bash
         run: |
           set -euo pipefail
@@ -660,8 +828,27 @@ jobs:
           }
           JSON
 
+          echo "Checking XHTTP configuration..."
+
           dist/sing-box check \
             -c /tmp/xhttp-test.json
+
+          echo
+          echo "XHTTP configuration verification passed."
+
+      - name: Skip ARM64 XHTTP runtime verification
+        if: matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ARM64 binary was successfully cross-compiled."
+          echo "XHTTP runtime/config check is performed by the amd64 build."
+          echo "ARM64 execution is skipped because this runner is amd64."
+
+      # ============================================================
+      # Package
+      # ============================================================
 
       - name: Package artifact
         env:
@@ -689,8 +876,17 @@ jobs:
             "${archive}" \
             > "release/sing-box-linux-${ARCH}.sha256"
 
+          echo
           echo "Created:"
           ls -lh release/
+
+          echo
+          echo "SHA256:"
+          cat "release/sing-box-linux-${ARCH}.sha256"
+
+      # ============================================================
+      # Upload artifact
+      # ============================================================
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -702,6 +898,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # ================================================================
+  # Release
+  # ================================================================
+
   release:
     name: Create GitHub Release
     needs:
@@ -711,11 +911,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # Download amd64
+      # ------------------------------------------------------------
+
       - name: Download amd64
         uses: actions/download-artifact@v4
         with:
           name: sing-box-linux-amd64
           path: release
+
+      # ------------------------------------------------------------
+      # Download arm64
+      # ------------------------------------------------------------
 
       - name: Download arm64
         uses: actions/download-artifact@v4
@@ -723,10 +931,16 @@ jobs:
           name: sing-box-linux-arm64
           path: release
 
+      # ------------------------------------------------------------
+      # Verify artifacts
+      # ------------------------------------------------------------
+
       - name: Verify artifacts
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Checking release artifacts..."
 
           test -f release/sing-box-linux-amd64.tar.gz
           test -f release/sing-box-linux-arm64.tar.gz
@@ -734,15 +948,37 @@ jobs:
           test -f release/sing-box-linux-amd64.sha256
           test -f release/sing-box-linux-arm64.sha256
 
+          echo
+          echo "Checking amd64 archive..."
+
           test "$(
             tar -tzf \
               release/sing-box-linux-amd64.tar.gz
           )" = "sing-box"
 
+          echo
+          echo "Checking arm64 archive..."
+
           test "$(
             tar -tzf \
               release/sing-box-linux-arm64.tar.gz
           )" = "sing-box"
+
+          echo
+          echo "Checking individual SHA256 files..."
+
+          (
+            cd release
+
+            sha256sum -c \
+              sing-box-linux-amd64.sha256
+
+            sha256sum -c \
+              sing-box-linux-arm64.sha256
+          )
+
+          echo
+          echo "Creating combined SHA256SUMS..."
 
           (
             cd release
@@ -753,6 +989,7 @@ jobs:
               > SHA256SUMS
           )
 
+          echo
           echo "Release files:"
           ls -lh release/
 
@@ -760,11 +997,17 @@ jobs:
           echo "SHA256SUMS:"
           cat release/SHA256SUMS
 
+      # ------------------------------------------------------------
+      # Publish
+      # ------------------------------------------------------------
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.get-version.outputs.sing_box_version }}-xhttp
+
           name: sing-box ${{ needs.get-version.outputs.sing_box_version }} + sing-xhttp ${{ needs.get-version.outputs.xhttp_version }}
+
           draft: false
           prerelease: false
           generate_release_notes: false
