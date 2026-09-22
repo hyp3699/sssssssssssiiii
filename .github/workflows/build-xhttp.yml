@@ -40,7 +40,7 @@ jobs:
           if not tag.startswith("v"):
               raise SystemExit(f"invalid sing-box tag: {tag}")
           print(tag)
-          ')
+          '")
 
           XHTTP_VERSION="$(
             git ls-remote --tags --refs "https://github.com/${XHTTP_REPO}.git" |
