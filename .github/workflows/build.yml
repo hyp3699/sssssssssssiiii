@@ -1,110 +1,332 @@
-name: Build sing-box
+name: Build sing-box XHTTP
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: "30 3 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  prepare:
+    name: Find latest compatible version
+    runs-on: ubuntu-24.04
+
+    outputs:
+      upstream_tag: ${{ steps.version.outputs.upstream_tag }}
+      lx_tag: ${{ steps.version.outputs.lx_tag }}
+
+    steps:
+      - name: Find latest official stable version
+        id: version
+        shell: bash
+        run: |
+          set -e
+
+          echo "Getting latest official sing-box release..."
+
+          UPSTREAM_TAG="$(
+            git ls-remote --tags --refs \
+              https://github.com/SagerNet/sing-box.git \
+              'refs/tags/v*' |
+            sed 's#.*refs/tags/##' |
+            grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+            sort -V |
+            tail -1
+          )"
+
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "Cannot find official stable release."
+            exit 1
+          fi
+
+          echo "Official version: $UPSTREAM_TAG"
+
+          VERSION="${UPSTREAM_TAG#v}"
+
+          echo "Looking for compatible XHTTP release..."
+
+          LX_TAG="$(
+            git ls-remote --tags --refs \
+              https://github.com/Leadaxe/sing-box-lx.git \
+              "refs/tags/v${VERSION}-lx.*" |
+            sed 's#.*refs/tags/##' |
+            sort -V |
+            tail -1
+          )"
+
+          if [ -z "$LX_TAG" ]; then
+            echo
+            echo "=============================================="
+            echo "XHTTP version not available."
+            echo
+            echo "Official sing-box : $UPSTREAM_TAG"
+            echo "Required LX tag    : v${VERSION}-lx.*"
+            echo
+            echo "The XHTTP fork has not caught up yet."
+            echo "Build stopped intentionally."
+            echo "=============================================="
+            exit 1
+          fi
+
+          echo "XHTTP source: $LX_TAG"
+
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "lx_tag=$LX_TAG" >> "$GITHUB_OUTPUT"
+
+
   build:
-    name: Build sing-box
+    name: Build ${{ matrix.arch }}
+    needs: prepare
     runs-on: ubuntu-24.04
 
     strategy:
+      fail-fast: false
+
       matrix:
         include:
           - arch: amd64
             goarch: amd64
+
           - arch: arm64
             goarch: arm64
 
     steps:
-      - name: Checkout custom repository
-        uses: actions/checkout@v4
+
+      # ==========================================
+      # 官方 sing-box
+      # ==========================================
 
       - name: Checkout official sing-box
         uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box
-          ref: v1.14.1
+          ref: ${{ needs.prepare.outputs.upstream_tag }}
           path: sing-box
+          fetch-depth: 1
+
+
+      # ==========================================
+      # XHTTP source
+      # ==========================================
+
+      - name: Checkout compatible XHTTP source
+        uses: actions/checkout@v4
+        with:
+          repository: Leadaxe/sing-box-lx
+          ref: ${{ needs.prepare.outputs.lx_tag }}
+          path: sing-box-lx
+          fetch-depth: 1
+
+
+      # ==========================================
+      # Go
+      # ==========================================
+
+      - name: Read Go version
+        id: goversion
+        shell: bash
+        run: |
+          set -e
+
+          cd sing-box
+
+          GO_VERSION="$(
+            sed -n 's/^go \([0-9.]*\).*/\1/p' go.mod |
+            head -1
+          )"
+
+          if [ -z "$GO_VERSION" ]; then
+            echo "Cannot determine Go version."
+            exit 1
+          fi
+
+          echo "Required Go: $GO_VERSION"
+
+          echo "go_version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: ${{ steps.goversion.outputs.go_version }}
           cache-dependency-path: sing-box/go.sum
 
-      - name: Prepare XHTTP
+
+      # ==========================================
+      # Install only XHTTP
+      # ==========================================
+
+      - name: Install XHTTP
+        shell: bash
         run: |
           set -e
 
-          echo "Preparing XHTTP..."
+          echo "Installing XHTTP..."
 
-          if [ -d "patches/xhttp" ]; then
-            cp -a patches/xhttp/. sing-box/
-          fi
+          # XHTTP transport
+          mkdir -p sing-box/transport/v2rayxhttp
 
-      - name: Check XHTTP source
+          cp -a \
+            sing-box-lx/transport/v2rayxhttp/. \
+            sing-box/transport/v2rayxhttp/
+
+
+          # XHTTP options
+          cp \
+            sing-box-lx/option/v2ray_xhttp.go \
+            sing-box/option/v2ray_xhttp.go
+
+
+          # XHTTP include
+          cp \
+            sing-box-lx/include/v2rayxhttp.go \
+            sing-box/include/v2rayxhttp.go
+
+
+          echo
+          echo "Installed files:"
+          find sing-box/transport/v2rayxhttp -type f
+          echo
+          ls -l sing-box/option/v2ray_xhttp.go
+          ls -l sing-box/include/v2rayxhttp.go
+
+
+      # ==========================================
+      # Verify XHTTP
+      # ==========================================
+
+      - name: Verify XHTTP
+        shell: bash
         run: |
           set -e
 
-          echo "Searching XHTTP implementation..."
+          echo "Checking XHTTP source..."
 
-          if ! grep -Rni --exclude-dir=.git \
-            'xhttp' sing-box/transport sing-box/option sing-box/include 2>/dev/null | head -30; then
-            echo "XHTTP implementation not found."
-            exit 1
-          fi
+          test -d sing-box/transport/v2rayxhttp
+          test -f sing-box/option/v2ray_xhttp.go
+          test -f sing-box/include/v2rayxhttp.go
 
-      - name: Build
+          grep -Rni \
+            "XHTTP\|xhttp" \
+            sing-box/transport/v2rayxhttp \
+            sing-box/option/v2ray_xhttp.go \
+            sing-box/include/v2rayxhttp.go \
+            | head -50
+
+
+      # ==========================================
+      # Build
+      # ==========================================
+
+      - name: Build sing-box
         working-directory: sing-box
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
+
         run: |
           set -e
 
-          TAGS="with_v2ray_api"
+          VERSION="${{ needs.prepare.outputs.upstream_tag }}"
 
-          VERSION="$(git describe --tags --always --dirty)"
+          echo "=========================================="
+          echo "sing-box : ${VERSION}"
+          echo "XHTTP    : enabled"
+          echo "V2Ray API: enabled"
+          echo "GOARCH   : ${GOARCH}"
+          echo "=========================================="
 
-          echo "Version: ${VERSION}"
-          echo "Architecture: $GOARCH"
-          echo "Build tags: ${TAGS}"
+          gofmt -w \
+            option/v2ray_xhttp.go \
+            include/v2rayxhttp.go \
+            transport/v2rayxhttp
+
 
           go build \
             -trimpath \
-            -tags "${TAGS}" \
-            -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
+            -tags "with_xhttp with_v2ray_api" \
+            -ldflags "-s -w" \
             -o "../sing-box-linux-${{ matrix.arch }}" \
             ./cmd/sing-box
 
+
+      # ==========================================
+      # Verify binary
+      # ==========================================
+
       - name: Verify binary
+        shell: bash
         run: |
           set -e
 
-          file "sing-box-linux-${{ matrix.arch }}"
+          BIN="sing-box-linux-${{ matrix.arch }}"
 
-          chmod +x "sing-box-linux-${{ matrix.arch }}"
+          chmod +x "$BIN"
 
-          "./sing-box-linux-${{ matrix.arch }}" version
+          echo "========== file =========="
+          file "$BIN"
+
+          echo
+          echo "========== version =========="
+          "./$BIN" version
+
+          echo
+          echo "========== size =========="
+          ls -lh "$BIN"
+
+
+      # ==========================================
+      # Check build tags / XHTTP
+      # ==========================================
+
+      - name: Check XHTTP build
+        shell: bash
+        run: |
+          set -e
+
+          BIN="./sing-box-linux-${{ matrix.arch }}"
+
+          echo "Checking binary..."
+
+          strings "$BIN" |
+            grep -i "xhttp" |
+            head -20 || true
+
+
+      # ==========================================
+      # Package
+      # ==========================================
 
       - name: Package
+        shell: bash
         run: |
+          set -e
+
           mkdir -p release
 
+          VERSION="${{ needs.prepare.outputs.upstream_tag }}"
+
+          ARCH="${{ matrix.arch }}"
+
           tar -czf \
-            "release/sing-box-linux-${{ matrix.arch }}.tar.gz" \
-            "sing-box-linux-${{ matrix.arch }}"
+            "release/sing-box-${VERSION}-xhttp-${ARCH}.tar.gz" \
+            "sing-box-linux-${ARCH}"
+
+          sha256sum \
+            "release/sing-box-${VERSION}-xhttp-${ARCH}.tar.gz" \
+            > \
+            "release/sing-box-${VERSION}-xhttp-${ARCH}.sha256"
+
+
+      # ==========================================
+      # Upload
+      # ==========================================
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sing-box-linux-${{ matrix.arch }}
-          path: release/sing-box-linux-${{ matrix.arch }}.tar.gz
+          name: sing-box-${{ needs.prepare.outputs.upstream_tag }}-xhttp-${{ matrix.arch }}
+          path: release/
