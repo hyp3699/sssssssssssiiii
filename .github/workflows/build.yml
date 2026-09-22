@@ -1,262 +1,182 @@
-name: Build sing-box XHTTP
+name: Build sing-box
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "30 2 * * *"
 
 permissions:
   contents: write
 
 jobs:
   get-version:
-    name: Get latest stable version
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
     outputs:
       upstream_version: ${{ steps.version.outputs.upstream_version }}
       lx_tag: ${{ steps.version.outputs.lx_tag }}
-
     steps:
-      - name: Get latest stable sing-box version
+      - name: Get latest stable versions
         id: version
-        shell: bash
         run: |
           set -euo pipefail
-
-          echo "正在获取最新 sing-box 正式版..."
-
-          UPSTREAM_VERSION=$(curl -fsSL \
-            "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
-            | jq -r '.tag_name')
-
-          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "null" ]; then
-            echo "无法获取 sing-box 最新版本"
+          UPSTREAM_VERSION="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
+          [ -n "$UPSTREAM_VERSION" ] || exit 1
+          LX_TAG="$(git ls-remote --tags --refs https://github.com/Leadaxe/sing-box-lx.git "v${UPSTREAM_VERSION}-lx.*" | awk -F/ '{print $3}' | sort -V | tail -n1)"
+          [ -n "$LX_TAG" ] || {
+            echo "No sing-box-lx release found for v${UPSTREAM_VERSION}"
             exit 1
-          fi
-
-          echo "Upstream stable: $UPSTREAM_VERSION"
-
-          echo "正在查找对应 sing-box-lx 版本..."
-
-          LX_TAG=$(curl -fsSL \
-            "https://api.github.com/repos/Leadaxe/sing-box-lx/tags?per_page=100" \
-            | jq -r --arg v "${UPSTREAM_VERSION}" '
-                .[]
-                | .name
-                | select(startswith($v + "-lx."))
-              ' \
-            | sort -V \
-            | tail -n 1)
-
-          if [ -z "$LX_TAG" ]; then
-            echo "没有找到对应的 sing-box-lx 版本"
-            echo "Upstream: $UPSTREAM_VERSION"
-            exit 1
-          fi
-
-          echo "sing-box-lx: $LX_TAG"
-
-          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
-          echo "lx_tag=$LX_TAG" >> "$GITHUB_OUTPUT"
-
+          }
+          echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "lx_tag=${LX_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Official: v${UPSTREAM_VERSION}"
+          echo "LX: ${LX_TAG}"
 
   build:
-    name: Build ${{ matrix.arch }}
     needs: get-version
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            goarch: amd64
-            output: sing-box-linux-amd64
-
-          - arch: arm64
-            goarch: arm64
-            output: sing-box-linux-arm64
-
+        arch:
+          - amd64
+          - arm64
     steps:
-      - name: Checkout sing-box-lx
-        uses: actions/checkout@v4
+      - name: Checkout official sing-box
+        uses: actions/checkout@v5
         with:
-          repository: Leadaxe/sing-box-lx
-          ref: ${{ needs.get-version.outputs.lx_tag }}
-          fetch-depth: 0
+          repository: SagerNet/sing-box
+          ref: v${{ needs.get-version.outputs.upstream_version }}
+          fetch-depth: 1
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Add sing-box-lx
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            curl \
-            jq \
-            ca-certificates
+          set -euxo pipefail
+          git remote add lx https://github.com/Leadaxe/sing-box-lx.git
+          git fetch --no-tags --depth=1 lx ${{ needs.get-version.outputs.lx_tag }}
+          git fetch --no-tags --depth=1 origin v${{ needs.get-version.outputs.upstream_version }}
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-          cache: true
-
-      - name: Show build information
+      - name: Merge XHTTP
         run: |
-          echo "======================================"
-          echo "sing-box custom build"
-          echo "======================================"
-          echo "Upstream version : ${{ needs.get-version.outputs.upstream_version }}"
-          echo "LX version       : ${{ needs.get-version.outputs.lx_tag }}"
-          echo "Architecture     : ${{ matrix.arch }}"
-          echo "Go architecture  : ${{ matrix.goarch }}"
-          echo "Build tags       : with_xhttp with_v2ray_api"
-          echo "======================================"
+          set -euxo pipefail
+          UPSTREAM="v${{ needs.get-version.outputs.upstream_version }}"
+          LX="${{ needs.get-version.outputs.lx_tag }}"
+          git fetch --no-tags lx "$LX"
 
-          go version
-          git describe --tags --always --dirty || true
+          mkdir -p /tmp/xhttp-patch
 
-      - name: Download Go dependencies
-        run: |
-          go mod download
+          git diff \
+            "$UPSTREAM" \
+            "lx/$LX" \
+            -- \
+            option/v2ray_xhttp.go \
+            option/v2ray_transport.go \
+            include/v2rayxhttp.go \
+            transport/v2rayxhttp \
+            transport/v2ray/transport.go \
+            transport/v2ray/registry.go \
+            > /tmp/xhttp-patch/xhttp.patch
 
-      - name: Build sing-box
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ needs.get-version.outputs.lx_tag }}"
-
-          LDFLAGS="-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}"
-
-          echo "开始编译..."
-          echo "GOOS=${GOOS}"
-          echo "GOARCH=${GOARCH}"
-          echo "TAGS=with_xhttp with_v2ray_api"
-
-          go build \
-            -trimpath \
-            -tags "with_xhttp with_v2ray_api" \
-            -ldflags "${LDFLAGS}" \
-            -o "${{ matrix.output }}" \
-            ./cmd/sing-box
-
-      - name: Verify binary
-        run: |
-          set -euo pipefail
-
-          BINARY="${{ matrix.output }}"
-
-          echo "======================================"
-          echo "检查编译产物"
-          echo "======================================"
-
-          ls -lh "$BINARY"
-
-          echo
-          echo "文件类型:"
-          file "$BINARY"
-
-          echo
-          echo "目标架构: ${{ matrix.goarch }}"
-
-          if [ "${{ matrix.goarch }}" = "amd64" ]; then
-            echo
-            echo "检查 sing-box 版本..."
-            ./"$BINARY" version
-          else
-            echo
-            echo "ARM64 为交叉编译产物"
-            echo "当前 GitHub Runner 为 AMD64"
-            echo "跳过 ARM64 直接执行测试"
+          if [ ! -s /tmp/xhttp-patch/xhttp.patch ]; then
+            echo "XHTTP patch is empty"
+            exit 1
           fi
 
-          echo
-          echo "二进制文件检查完成"
+          git apply --3way /tmp/xhttp-patch/xhttp.patch
 
-      - name: Create archive
-        run: |
-          set -euo pipefail
+          rm -rf /tmp/xhttp-patch
 
-          mkdir -p release
+          test -f option/v2ray_xhttp.go
+          test -f include/v2rayxhttp.go
+          test -d transport/v2rayxhttp
 
-          cp "${{ matrix.output }}" \
-             "release/sing-box"
+          echo "XHTTP merge completed"
 
-          tar -C release \
-            -czf "${{ matrix.output }}.tar.gz" \
-            sing-box
-
-          rm -f release/sing-box
-
-          sha256sum \
-            "${{ matrix.output }}.tar.gz" \
-            > "${{ matrix.output }}.sha256"
-
-          echo
-          echo "生成文件:"
-          ls -lh \
-            "${{ matrix.output }}.tar.gz" \
-            "${{ matrix.output }}.sha256"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
-          name: ${{ matrix.output }}
-          path: |
-            ${{ matrix.output }}.tar.gz
-            ${{ matrix.output }}.sha256
+          go-version: "1.26.8"
 
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          set -euxo pipefail
+
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            GOARCH=amd64
+          else
+            GOARCH=arm64
+          fi
+
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_xhttp,with_v2ray_api"
+          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+
+          echo "Official version: ${{ needs.get-version.outputs.upstream_version }}"
+          echo "LX version: ${{ needs.get-version.outputs.lx_tag }}"
+          echo "Architecture: ${GOARCH}"
+          echo "Build tags: ${TAGS}"
+
+          go mod download
+
+          go build -v -trimpath \
+            -o "sing-box-linux-${{ matrix.arch }}" \
+            -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.get-version.outputs.upstream_version }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+            ./cmd/sing-box
+
+      - name: Check build
+        run: |
+          set -euxo pipefail
+          chmod +x "sing-box-linux-${{ matrix.arch }}"
+          "./sing-box-linux-${{ matrix.arch }}" version
+          ls -lh "sing-box-linux-${{ matrix.arch }}"
+          file "sing-box-linux-${{ matrix.arch }}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: sing-box-${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi-linux-${{ matrix.arch }}
+          path: sing-box-linux-${{ matrix.arch }}
+          retention-days: 90
 
   release:
-    name: Create GitHub Release
     needs:
       - get-version
       - build
-
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
         with:
-          path: release
+          path: release-files
 
-      - name: Prepare release files
+      - name: Prepare release
         run: |
-          set -euo pipefail
-
-          mkdir -p upload
-
-          echo "======================================"
-          echo "下载的构建文件"
-          echo "======================================"
-
-          find release -type f -print
-
-          find release \
-            -type f \
-            \( -name "*.tar.gz" -o -name "*.sha256" \) \
-            -exec cp {} upload/ \;
-
-          echo
-          echo "======================================"
-          echo "Release 文件"
-          echo "======================================"
-
-          ls -lh upload
+          set -euxo pipefail
+          mkdir -p release
+          find release-files -type f -name 'sing-box-linux-*' -exec cp {} release/ \;
+          ls -lh release
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.get-version.outputs.lx_tag }}-custom
-          name: sing-box ${{ needs.get-version.outputs.lx_tag }} XHTTP
-          generate_release_notes: true
-          files: |
-            upload/*.tar.gz
-            upload/*.sha256
+          tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi
+          name: sing-box v${{ needs.get-version.outputs.upstream_version }} XHTTP + V2Ray API
+          body: |
+            Official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}
+
+            XHTTP source:
+            Leadaxe/sing-box-lx ${{ needs.get-version.outputs.lx_tag }}
+
+            Build:
+            Official sing-box features preserved.
+            Added with_xhttp.
+            Added with_v2ray_api.
+
+            Architectures:
+            Linux amd64
+            Linux arm64
+          files: release/*
+          make_latest: false
