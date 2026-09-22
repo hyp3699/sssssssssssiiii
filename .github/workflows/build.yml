@@ -1,0 +1,110 @@
+name: Build sing-box
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build sing-box
+    runs-on: ubuntu-24.04
+
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            goarch: amd64
+          - arch: arm64
+            goarch: arm64
+
+    steps:
+      - name: Checkout custom repository
+        uses: actions/checkout@v4
+
+      - name: Checkout official sing-box
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box
+          ref: v1.14.1
+          path: sing-box
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: sing-box/go.sum
+
+      - name: Prepare XHTTP
+        run: |
+          set -e
+
+          echo "Preparing XHTTP..."
+
+          if [ -d "patches/xhttp" ]; then
+            cp -a patches/xhttp/. sing-box/
+          fi
+
+      - name: Check XHTTP source
+        run: |
+          set -e
+
+          echo "Searching XHTTP implementation..."
+
+          if ! grep -Rni --exclude-dir=.git \
+            'xhttp' sing-box/transport sing-box/option sing-box/include 2>/dev/null | head -30; then
+            echo "XHTTP implementation not found."
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: sing-box
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -e
+
+          TAGS="with_v2ray_api"
+
+          VERSION="$(git describe --tags --always --dirty)"
+
+          echo "Version: ${VERSION}"
+          echo "Architecture: $GOARCH"
+          echo "Build tags: ${TAGS}"
+
+          go build \
+            -trimpath \
+            -tags "${TAGS}" \
+            -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
+            -o "../sing-box-linux-${{ matrix.arch }}" \
+            ./cmd/sing-box
+
+      - name: Verify binary
+        run: |
+          set -e
+
+          file "sing-box-linux-${{ matrix.arch }}"
+
+          chmod +x "sing-box-linux-${{ matrix.arch }}"
+
+          "./sing-box-linux-${{ matrix.arch }}" version
+
+      - name: Package
+        run: |
+          mkdir -p release
+
+          tar -czf \
+            "release/sing-box-linux-${{ matrix.arch }}.tar.gz" \
+            "sing-box-linux-${{ matrix.arch }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-linux-${{ matrix.arch }}
+          path: release/sing-box-linux-${{ matrix.arch }}.tar.gz
