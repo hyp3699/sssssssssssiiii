@@ -11,37 +11,41 @@ permissions:
 jobs:
   get-version:
     runs-on: ubuntu-24.04
+
     outputs:
       upstream_version: ${{ steps.version.outputs.upstream_version }}
 
     steps:
-      - name: Get latest official version
+      - name: Get official sing-box version
         id: version
         shell: bash
         run: |
           set -euo pipefail
 
           UPSTREAM_VERSION="$(
-            curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest |
+            curl -fsSL \
+              https://api.github.com/repos/SagerNet/sing-box/releases/latest |
             jq -r '.tag_name' |
             sed 's/^v//'
           )"
 
-          [ -n "$UPSTREAM_VERSION" ] || {
-            echo "Failed to detect latest official sing-box version"
+          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "null" ]; then
+            echo "ERROR: Failed to detect official sing-box version"
             exit 1
-          }
+          fi
 
           echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
 
-          echo "Official sing-box: v${UPSTREAM_VERSION}"
+          echo "Official sing-box version: v${UPSTREAM_VERSION}"
 
   build:
     needs: get-version
+
     runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
+
       matrix:
         arch:
           - amd64
@@ -62,7 +66,7 @@ jobs:
           go-version: "1.26.8"
           cache: true
 
-      - name: Verify supported sing-box source
+      - name: Verify sing-box source
         shell: bash
         run: |
           set -euo pipefail
@@ -70,9 +74,10 @@ jobs:
           VERSION="${{ needs.get-version.outputs.upstream_version }}"
 
           if [ "$VERSION" != "1.14.1" ]; then
-            echo "ERROR: This XHTTP integration is currently prepared for sing-box v1.14.1."
-            echo "Detected: v${VERSION}"
-            echo "Do not build against an unverified sing-box source tree."
+            echo "ERROR: This workflow is prepared for sing-box v1.14.1."
+            echo "Detected official version: v${VERSION}"
+            echo
+            echo "Please update the XHTTP integration before using another version."
             exit 1
           fi
 
@@ -80,7 +85,7 @@ jobs:
           test -f option/v2ray_transport.go
           test -f transport/v2ray/transport.go
 
-          echo "Verified sing-box v${VERSION}"
+          echo "Verified official sing-box v${VERSION}"
 
       - name: Add sing-xhttp
         shell: bash
@@ -98,7 +103,8 @@ jobs:
             github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}
 
           echo
-          echo "sing-xhttp module:"
+          echo "========== sing-xhttp =========="
+
           go list -m github.com/justinwoo280/sing-xhttp
 
       - name: Add XHTTP constant
@@ -109,30 +115,33 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          p = Path("constant/v2ray.go")
-          s = p.read_text()
+          path = Path("constant/v2ray.go")
+          source = path.read_text()
 
-          if "V2RayTransportTypeXHTTP" in s:
+          if "V2RayTransportTypeXHTTP" in source:
               print("XHTTP constant already exists.")
               raise SystemExit(0)
 
-          old = '\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"\n'
+          marker = '\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"\n'
 
-          if old not in s:
+          if marker not in source:
               raise SystemExit(
-                  "ERROR: unexpected constant/v2ray.go structure"
+                  "ERROR: Unexpected constant/v2ray.go structure."
               )
 
-          new = (
-              old +
-              '\tV2RayTransportTypeXHTTP       = "xhttp"\n'
+          replacement = (
+              marker +
+              '\tV2RayTransportTypeXHTTP = "xhttp"\n'
           )
 
-          p.write_text(s.replace(old, new, 1))
+          source = source.replace(marker, replacement, 1)
 
-          print("XHTTP constant added.")
+          path.write_text(source)
+
+          print("XHTTP constant added successfully.")
           PY
 
+          echo
           cat constant/v2ray.go
 
       - name: Add XHTTP options
@@ -143,112 +152,153 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          p = Path("option/v2ray_transport.go")
-          s = p.read_text()
+          path = Path("option/v2ray_transport.go")
+          source = path.read_text()
 
-          if "github.com/justinwoo280/sing-xhttp/xhttp" not in s:
-              marker = (
-                  '\t"github.com/sagernet/sing-box/schema"\n'
-              )
+          # ---------------------------------------------------------
+          # Import sing-xhttp
+          # ---------------------------------------------------------
 
-              if marker not in s:
+          import_marker = (
+              '\t"github.com/sagernet/sing-box/schema"\n'
+          )
+
+          xhttp_import = (
+              '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n'
+          )
+
+          if "github.com/justinwoo280/sing-xhttp/xhttp" not in source:
+              if import_marker not in source:
                   raise SystemExit(
-                      "ERROR: cannot find schema import"
+                      "ERROR: Cannot find sing-box schema import."
                   )
 
-              s = s.replace(
-                  marker,
-                  marker +
-                  '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n',
+              source = source.replace(
+                  import_marker,
+                  import_marker + xhttp_import,
                   1
               )
 
+          # ---------------------------------------------------------
+          # Add XHTTPOptions to _V2RayTransportOptions
+          # ---------------------------------------------------------
+
           old = '''type _V2RayTransportOptions struct {
-\tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
-\tHTTPOptions        V2RayHTTPOptions        `json:"-"`
-\tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
-\tQUICOptions        V2RayQUICOptions        `json:"-"`
-\tGRPCOptions        V2RayGRPCOptions        `json:"-"`
-\tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
-}'''
+          Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
+          HTTPOptions        V2RayHTTPOptions        `json:"-"`
+          WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+          QUICOptions        V2RayQUICOptions        `json:"-"`
+          GRPCOptions        V2RayGRPCOptions        `json:"-"`
+          HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+          }'''
 
           new = '''type _V2RayTransportOptions struct {
-\tType               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
-\tHTTPOptions        V2RayHTTPOptions        `json:"-"`
-\tWebsocketOptions   V2RayWebsocketOptions   `json:"-"`
-\tQUICOptions        V2RayQUICOptions        `json:"-"`
-\tGRPCOptions        V2RayGRPCOptions        `json:"-"`
-\tHTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
-\tXHTTPOptions       xhttp.Options           `json:"-"`
-}'''
+          Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
+          HTTPOptions        V2RayHTTPOptions        `json:"-"`
+          WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
+          QUICOptions        V2RayQUICOptions        `json:"-"`
+          GRPCOptions        V2RayGRPCOptions        `json:"-"`
+          HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+          XHTTPOptions       xhttp.Options           `json:"-"`
+          }'''
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: unexpected _V2RayTransportOptions structure"
+          if "XHTTPOptions" not in source:
+              if old not in source:
+                  raise SystemExit(
+                      "ERROR: Unexpected _V2RayTransportOptions structure."
+                  )
+
+              source = source.replace(old, new, 1)
+
+          # ---------------------------------------------------------
+          # MarshalJSON
+          # ---------------------------------------------------------
+
+          marshal_old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\tv = o.HTTPUpgradeOptions
+          \tcase "":
+          '''
+
+          marshal_new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\tv = o.HTTPUpgradeOptions
+          \tcase C.V2RayTransportTypeXHTTP:
+          \t\tv = o.XHTTPOptions
+          \tcase "":
+          '''
+
+          if "case C.V2RayTransportTypeXHTTP:" not in source:
+              if marshal_old not in source:
+                  raise SystemExit(
+                      "ERROR: Cannot find MarshalJSON HTTPUpgrade case."
+                  )
+
+              source = source.replace(
+                  marshal_old,
+                  marshal_new,
+                  1
               )
 
-          s = s.replace(old, new, 1)
+          # ---------------------------------------------------------
+          # UnmarshalJSON
+          # ---------------------------------------------------------
 
-          old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\tv = o.HTTPUpgradeOptions
-\tcase "":
-'''
+          unmarshal_old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\tv = &o.HTTPUpgradeOptions
+          \tdefault:
+          '''
 
-          new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\tv = o.HTTPUpgradeOptions
-\tcase C.V2RayTransportTypeXHTTP:
-\t\tv = o.XHTTPOptions
-\tcase "":
-'''
+          unmarshal_new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\tv = &o.HTTPUpgradeOptions
+          \tcase C.V2RayTransportTypeXHTTP:
+          \t\tv = &o.XHTTPOptions
+          \tdefault:
+          '''
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: cannot find MarshalJSON HTTPUpgrade case"
+          if "v = &o.XHTTPOptions" not in source:
+              if unmarshal_old not in source:
+                  raise SystemExit(
+                      "ERROR: Cannot find UnmarshalJSON HTTPUpgrade case."
+                  )
+
+              source = source.replace(
+                  unmarshal_old,
+                  unmarshal_new,
+                  1
               )
 
-          s = s.replace(old, new, 1)
+          # ---------------------------------------------------------
+          # DescribeSchema
+          # ---------------------------------------------------------
 
-          old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\tv = &o.HTTPUpgradeOptions
-\tdefault:
-'''
+          schema_old = '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
+          \t\t}, nil)
+          '''
 
-          new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\tv = &o.HTTPUpgradeOptions
-\tcase C.V2RayTransportTypeXHTTP:
-\t\tv = &o.XHTTPOptions
-\tdefault:
-'''
+          schema_new = '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
+          \t\t\t{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[xhttp.Options]()},
+          \t\t}, nil)
+          '''
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: cannot find UnmarshalJSON HTTPUpgrade case"
+          if "reflect.TypeFor[xhttp.Options]()" not in source:
+              if schema_old not in source:
+                  raise SystemExit(
+                      "ERROR: Cannot find DescribeSchema HTTPUpgrade variant."
+                  )
+
+              source = source.replace(
+                  schema_old,
+                  schema_new,
+                  1
               )
 
-          s = s.replace(old, new, 1)
+          path.write_text(source)
 
-          old = '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
-\t\t}, nil)
-'''
-
-          new = '''\t\t\t{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
-\t\t\t{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[xhttp.Options]()},
-\t\t}, nil)
-'''
-
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: cannot find DescribeSchema HTTPUpgrade variant"
-              )
-
-          s = s.replace(old, new, 1)
-
-          p.write_text(s)
-
-          print("XHTTP option integration completed.")
+          print("XHTTP option integration completed successfully.")
           PY
 
           echo
+          echo "========== XHTTP option references =========="
+
           grep -n \
             -E \
             'XHTTP|xhttp' \
@@ -262,73 +312,100 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          p = Path("transport/v2ray/transport.go")
-          s = p.read_text()
+          path = Path("transport/v2ray/transport.go")
+          source = path.read_text()
 
-          if "github.com/justinwoo280/sing-xhttp/xhttp" not in s:
-              marker = (
-                  '\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"\n'
-              )
+          # ---------------------------------------------------------
+          # Import sing-xhttp
+          # ---------------------------------------------------------
 
-              if marker not in s:
+          import_marker = (
+              '\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"\n'
+          )
+
+          xhttp_import = (
+              '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n'
+          )
+
+          if "github.com/justinwoo280/sing-xhttp/xhttp" not in source:
+              if import_marker not in source:
                   raise SystemExit(
-                      "ERROR: cannot find v2rayhttpupgrade import"
+                      "ERROR: Cannot find v2rayhttpupgrade import."
                   )
 
-              s = s.replace(
-                  marker,
-                  marker +
-                  '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n',
+              source = source.replace(
+                  import_marker,
+                  import_marker + xhttp_import,
                   1
               )
 
-          old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
-\tdefault:
-'''
+          # ---------------------------------------------------------
+          # XHTTP server
+          # ---------------------------------------------------------
 
-          new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
-\tcase C.V2RayTransportTypeXHTTP:
-\t\treturn xhttp.NewServer(ctx, logger, options.XHTTPOptions, tlsConfig, handler)
-\tdefault:
-'''
+          server_old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
+          \tdefault:
+          '''
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: cannot find server HTTPUpgrade case"
+          server_new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\treturn v2rayhttpupgrade.NewServer(ctx, logger, options.HTTPUpgradeOptions, tlsConfig, handler)
+          \tcase C.V2RayTransportTypeXHTTP:
+          \t\treturn xhttp.NewServer(ctx, logger, options.XHTTPOptions, tlsConfig, handler)
+          \tdefault:
+          '''
+
+          if "xhttp.NewServer" not in source:
+              if server_old not in source:
+                  raise SystemExit(
+                      "ERROR: Cannot find V2Ray server HTTPUpgrade case."
+                  )
+
+              source = source.replace(
+                  server_old,
+                  server_new,
+                  1
               )
 
-          s = s.replace(old, new, 1)
+          # ---------------------------------------------------------
+          # XHTTP client
+          # ---------------------------------------------------------
 
-          old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
-\tdefault:
-'''
+          client_old = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+          \tdefault:
+          '''
 
-          new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
-\t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
-\tcase C.V2RayTransportTypeXHTTP:
-\t\treturn xhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
-\tdefault:
-'''
+          client_new = '''\tcase C.V2RayTransportTypeHTTPUpgrade:
+          \t\treturn v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+          \tcase C.V2RayTransportTypeXHTTP:
+          \t\treturn xhttp.NewClient(ctx, dialer, serverAddr, options.XHTTPOptions, tlsConfig)
+          \tdefault:
+          '''
 
-          if old not in s:
-              raise SystemExit(
-                  "ERROR: cannot find client HTTPUpgrade case"
+          if "xhttp.NewClient" not in source:
+              if client_old not in source:
+                  raise SystemExit(
+                      "ERROR: Cannot find V2Ray client HTTPUpgrade case."
+                  )
+
+              source = source.replace(
+                  client_old,
+                  client_new,
+                  1
               )
 
-          s = s.replace(old, new, 1)
+          path.write_text(source)
 
-          p.write_text(s)
-
-          print("XHTTP server/client integration completed.")
+          print("XHTTP server/client integration completed successfully.")
           PY
 
           echo
+          echo "========== XHTTP transport references =========="
+
           grep -n \
             -E \
-            'XHTTP|xhttp' \
+            'XHTTP|xhttp.NewServer|xhttp.NewClient|sing-xhttp' \
             transport/v2ray/transport.go
 
       - name: Format Go source
@@ -347,12 +424,14 @@ jobs:
           set -euo pipefail
 
           echo "========== constant =========="
+
           grep -n \
             "V2RayTransportTypeXHTTP" \
             constant/v2ray.go
 
           echo
           echo "========== option =========="
+
           grep -n \
             -E \
             'XHTTPOptions|V2RayTransportTypeXHTTP|sing-xhttp' \
@@ -360,6 +439,7 @@ jobs:
 
           echo
           echo "========== transport =========="
+
           grep -n \
             -E \
             'XHTTP|xhttp.NewServer|xhttp.NewClient|sing-xhttp' \
@@ -367,6 +447,7 @@ jobs:
 
           echo
           echo "========== module =========="
+
           go list -m github.com/justinwoo280/sing-xhttp
 
       - name: Build sing-box
@@ -374,14 +455,22 @@ jobs:
         env:
           CGO_ENABLED: "0"
           GOOS: linux
+
         run: |
           set -euxo pipefail
 
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            GOARCH=amd64
-          else
-            GOARCH=arm64
-          fi
+          case "${{ matrix.arch }}" in
+            amd64)
+              GOARCH=amd64
+              ;;
+            arm64)
+              GOARCH=arm64
+              ;;
+            *)
+              echo "Unsupported architecture"
+              exit 1
+              ;;
+          esac
 
           OFFICIAL_VERSION="${{ needs.get-version.outputs.upstream_version }}"
 
@@ -394,10 +483,13 @@ jobs:
 
           LDFLAGS_SHARED="$(cat release/LDFLAGS)"
 
-          echo "Official version: v${OFFICIAL_VERSION}"
-          echo "Architecture: ${GOARCH}"
-          echo "Build tags: ${TAGS}"
-          echo "LDFLAGS: ${LDFLAGS_SHARED}"
+          echo "========================================"
+          echo "Official version : v${OFFICIAL_VERSION}"
+          echo "Architecture     : ${GOARCH}"
+          echo "Official tags    : ${OFFICIAL_TAGS}"
+          echo "Final tags       : ${TAGS}"
+          echo "LDFLAGS          : ${LDFLAGS_SHARED}"
+          echo "========================================"
 
           go mod download
 
@@ -410,26 +502,29 @@ jobs:
             -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
 
-      - name: Check build
+      - name: Verify binary
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
-          chmod +x \
-            "sing-box-linux-${{ matrix.arch }}"
+          BINARY="sing-box-linux-${{ matrix.arch }}"
 
-          "./sing-box-linux-${{ matrix.arch }}" version
+          test -f "$BINARY"
+
+          chmod +x "$BINARY"
+
+          echo "========== sing-box version =========="
+
+          "./${BINARY}" version
 
           echo
-          echo "========== Binary =========="
+          echo "========== binary =========="
 
-          ls -lh \
-            "sing-box-linux-${{ matrix.arch }}"
+          ls -lh "$BINARY"
 
-          file \
-            "sing-box-linux-${{ matrix.arch }}"
+          file "$BINARY"
 
-      - name: Test XHTTP inbound and outbound
+      - name: Test XHTTP configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -479,7 +574,8 @@ jobs:
           }
           EOF
 
-          echo "========== XHTTP test config =========="
+          echo "========== XHTTP test configuration =========="
+
           cat xhttp-test.json
 
           echo
@@ -490,9 +586,9 @@ jobs:
             -c xhttp-test.json
 
           echo
-          echo "XHTTP inbound/outbound configuration check passed."
+          echo "XHTTP configuration check PASSED."
 
-      - name: Upload Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: sing-box-${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi-linux-${{ matrix.arch }}
@@ -508,7 +604,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v5
         with:
           path: release-files
@@ -551,18 +647,23 @@ jobs:
             release/sing-box-linux-amd64 \
             release/sing-box-linux-arm64
 
+          echo "========== Release files =========="
+
           ls -lh release
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi
+
           name: sing-box v${{ needs.get-version.outputs.upstream_version }} XHTTP + V2Ray API
+
           make_latest: false
+
           generate_release_notes: false
 
           body: |
-            Based on official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}
+            Based on official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}.
 
             Added:
             - github.com/justinwoo280/sing-xhttp v0.1.6
@@ -579,11 +680,10 @@ jobs:
             - Linux amd64
             - Linux arm64
 
-            No sing-box-lx features are included.
+            This build does not use sing-box-lx.
 
           files: |
             release/sing-box-linux-amd64.tar.gz
             release/sing-box-linux-arm64.tar.gz
 
           fail_on_unmatched_files: true
-          
