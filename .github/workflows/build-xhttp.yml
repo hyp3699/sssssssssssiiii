@@ -872,17 +872,9 @@ jobs:
 
           test "$(tar -tzf "${archive}")" = "sing-box"
 
-          sha256sum \
-            "${archive}" \
-            > "release/sing-box-linux-${ARCH}.sha256"
-
           echo
           echo "Created:"
           ls -lh release/
-
-          echo
-          echo "SHA256:"
-          cat "release/sing-box-linux-${ARCH}.sha256"
 
       # ============================================================
       # Upload artifact
@@ -894,7 +886,6 @@ jobs:
           name: sing-box-linux-${{ matrix.arch }}
           path: |
             release/sing-box-linux-${{ matrix.arch }}.tar.gz
-            release/sing-box-linux-${{ matrix.arch }}.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -945,9 +936,6 @@ jobs:
           test -f release/sing-box-linux-amd64.tar.gz
           test -f release/sing-box-linux-arm64.tar.gz
 
-          test -f release/sing-box-linux-amd64.sha256
-          test -f release/sing-box-linux-arm64.sha256
-
           echo
           echo "Checking amd64 archive..."
 
@@ -965,37 +953,8 @@ jobs:
           )" = "sing-box"
 
           echo
-          echo "Checking individual SHA256 files..."
-
-          (
-            cd release
-
-            sha256sum -c \
-              sing-box-linux-amd64.sha256
-
-            sha256sum -c \
-              sing-box-linux-arm64.sha256
-          )
-
-          echo
-          echo "Creating combined SHA256SUMS..."
-
-          (
-            cd release
-
-            sha256sum \
-              sing-box-linux-amd64.tar.gz \
-              sing-box-linux-arm64.tar.gz \
-              > SHA256SUMS
-          )
-
-          echo
           echo "Release files:"
           ls -lh release/
-
-          echo
-          echo "SHA256SUMS:"
-          cat release/SHA256SUMS
 
       # ------------------------------------------------------------
       # Publish
@@ -1029,8 +988,5 @@ jobs:
           files: |
             release/sing-box-linux-amd64.tar.gz
             release/sing-box-linux-arm64.tar.gz
-            release/sing-box-linux-amd64.sha256
-            release/sing-box-linux-arm64.sha256
-            release/SHA256SUMS
 
           fail_on_unmatched_files: true
