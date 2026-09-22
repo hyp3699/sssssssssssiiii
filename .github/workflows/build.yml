@@ -62,12 +62,34 @@ jobs:
           go-version: "1.26.8"
           cache: true
 
+      - name: Verify supported sing-box source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ needs.get-version.outputs.upstream_version }}"
+
+          if [ "$VERSION" != "1.14.1" ]; then
+            echo "ERROR: This XHTTP integration is currently prepared for sing-box v1.14.1."
+            echo "Detected: v${VERSION}"
+            echo "Do not build against an unverified sing-box source tree."
+            exit 1
+          fi
+
+          test -f constant/v2ray.go
+          test -f option/v2ray_transport.go
+          test -f transport/v2ray/transport.go
+
+          echo "Verified sing-box v${VERSION}"
+
       - name: Add sing-xhttp
         shell: bash
         run: |
           set -euo pipefail
 
           XHTTP_VERSION="v0.1.6"
+
+          echo "Adding sing-xhttp ${XHTTP_VERSION}"
 
           go mod edit \
             -require=github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}
@@ -76,7 +98,7 @@ jobs:
             github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}
 
           echo
-          echo "sing-xhttp:"
+          echo "sing-xhttp module:"
           go list -m github.com/justinwoo280/sing-xhttp
 
       - name: Add XHTTP constant
@@ -90,25 +112,28 @@ jobs:
           p = Path("constant/v2ray.go")
           s = p.read_text()
 
-          if "V2RayTransportTypeXHTTP" not in s:
-              old = '\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"\n'
+          if "V2RayTransportTypeXHTTP" in s:
+              print("XHTTP constant already exists.")
+              raise SystemExit(0)
 
-              if old not in s:
-                  raise SystemExit(
-                      "Cannot find V2RayTransportTypeHTTPUpgrade in constant/v2ray.go"
-                  )
+          old = '\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"\n'
 
-              new = (
-                  old +
-                  '\tV2RayTransportTypeXHTTP       = "xhttp"\n'
+          if old not in s:
+              raise SystemExit(
+                  "ERROR: unexpected constant/v2ray.go structure"
               )
 
-              s = s.replace(old, new, 1)
-              p.write_text(s)
+          new = (
+              old +
+              '\tV2RayTransportTypeXHTTP       = "xhttp"\n'
+          )
 
-          print("XHTTP constant:")
-          print(p.read_text())
+          p.write_text(s.replace(old, new, 1))
+
+          print("XHTTP constant added.")
           PY
+
+          cat constant/v2ray.go
 
       - name: Add XHTTP options
         shell: bash
@@ -121,19 +146,19 @@ jobs:
           p = Path("option/v2ray_transport.go")
           s = p.read_text()
 
-          import_marker = (
-              '\t"github.com/sagernet/sing-box/schema"\n'
-          )
+          if "github.com/justinwoo280/sing-xhttp/xhttp" not in s:
+              marker = (
+                  '\t"github.com/sagernet/sing-box/schema"\n'
+              )
 
-          if 'github.com/justinwoo280/sing-xhttp/xhttp' not in s:
-              if import_marker not in s:
+              if marker not in s:
                   raise SystemExit(
-                      "Cannot find schema import in option/v2ray_transport.go"
+                      "ERROR: cannot find schema import"
                   )
 
               s = s.replace(
-                  import_marker,
-                  import_marker +
+                  marker,
+                  marker +
                   '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n',
                   1
               )
@@ -159,7 +184,7 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find _V2RayTransportOptions in expected v1.14.1 form"
+                  "ERROR: unexpected _V2RayTransportOptions structure"
               )
 
           s = s.replace(old, new, 1)
@@ -178,7 +203,7 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find MarshalJSON HTTPUpgrade switch"
+                  "ERROR: cannot find MarshalJSON HTTPUpgrade case"
               )
 
           s = s.replace(old, new, 1)
@@ -197,7 +222,7 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find UnmarshalJSON HTTPUpgrade switch"
+                  "ERROR: cannot find UnmarshalJSON HTTPUpgrade case"
               )
 
           s = s.replace(old, new, 1)
@@ -213,7 +238,7 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find DescribeSchema HTTPUpgrade variant"
+                  "ERROR: cannot find DescribeSchema HTTPUpgrade variant"
               )
 
           s = s.replace(old, new, 1)
@@ -226,7 +251,7 @@ jobs:
           echo
           grep -n \
             -E \
-            'xhttp|XHTTP' \
+            'XHTTP|xhttp' \
             option/v2ray_transport.go
 
       - name: Add XHTTP server and client
@@ -240,19 +265,19 @@ jobs:
           p = Path("transport/v2ray/transport.go")
           s = p.read_text()
 
-          import_marker = (
-              '\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"\n'
-          )
+          if "github.com/justinwoo280/sing-xhttp/xhttp" not in s:
+              marker = (
+                  '\t"github.com/sagernet/sing-box/transport/v2rayhttpupgrade"\n'
+              )
 
-          if 'github.com/justinwoo280/sing-xhttp/xhttp' not in s:
-              if import_marker not in s:
+              if marker not in s:
                   raise SystemExit(
-                      "Cannot find v2rayhttpupgrade import"
+                      "ERROR: cannot find v2rayhttpupgrade import"
                   )
 
               s = s.replace(
-                  import_marker,
-                  import_marker +
+                  marker,
+                  marker +
                   '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n',
                   1
               )
@@ -271,7 +296,7 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find server HTTPUpgrade switch"
+                  "ERROR: cannot find server HTTPUpgrade case"
               )
 
           s = s.replace(old, new, 1)
@@ -290,23 +315,33 @@ jobs:
 
           if old not in s:
               raise SystemExit(
-                  "Cannot find client HTTPUpgrade switch"
+                  "ERROR: cannot find client HTTPUpgrade case"
               )
 
           s = s.replace(old, new, 1)
 
           p.write_text(s)
 
-          print("XHTTP server/client transport integration completed.")
+          print("XHTTP server/client integration completed.")
           PY
 
           echo
           grep -n \
             -E \
-            'xhttp|XHTTP' \
+            'XHTTP|xhttp' \
             transport/v2ray/transport.go
 
-      - name: Verify XHTTP source integration
+      - name: Format Go source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gofmt -w \
+            constant/v2ray.go \
+            option/v2ray_transport.go \
+            transport/v2ray/transport.go
+
+      - name: Verify XHTTP integration
         shell: bash
         run: |
           set -euo pipefail
@@ -386,15 +421,6 @@ jobs:
           "./sing-box-linux-${{ matrix.arch }}" version
 
           echo
-          echo "========== XHTTP strings =========="
-
-          strings \
-            "sing-box-linux-${{ matrix.arch }}" |
-            grep -E \
-            'v2rayxhttp|xhttp.NewServer|xhttp.NewClient|xhttp' |
-            head -n 100 || true
-
-          echo
           echo "========== Binary =========="
 
           ls -lh \
@@ -403,17 +429,20 @@ jobs:
           file \
             "sing-box-linux-${{ matrix.arch }}"
 
-      - name: Test XHTTP configuration
+      - name: Test XHTTP inbound and outbound
         shell: bash
         run: |
           set -euo pipefail
 
           cat > xhttp-test.json <<'EOF'
           {
+            "log": {
+              "level": "error"
+            },
             "inbounds": [
               {
                 "type": "vless",
-                "tag": "xhttp-server-test",
+                "tag": "xhttp-in",
                 "listen": "127.0.0.1",
                 "listen_port": 18443,
                 "users": [
@@ -432,7 +461,7 @@ jobs:
             "outbounds": [
               {
                 "type": "vless",
-                "tag": "xhttp-client-test",
+                "tag": "xhttp-out",
                 "server": "127.0.0.1",
                 "server_port": 18443,
                 "uuid": "8a21b0ab-c9a6-4763-bbc5-9a170a8a1869",
@@ -450,8 +479,7 @@ jobs:
           }
           EOF
 
-          echo "========== XHTTP test configuration =========="
-
+          echo "========== XHTTP test config =========="
           cat xhttp-test.json
 
           echo
@@ -460,6 +488,9 @@ jobs:
           "./sing-box-linux-${{ matrix.arch }}" \
             check \
             -c xhttp-test.json
+
+          echo
+          echo "XHTTP inbound/outbound configuration check passed."
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v5
@@ -535,15 +566,14 @@ jobs:
 
             Added:
             - github.com/justinwoo280/sing-xhttp v0.1.6
-            - XHTTP server/inbound
-            - XHTTP client/outbound
-            - V2Ray API
+            - XHTTP inbound/server
+            - XHTTP outbound/client
+            - with_v2ray_api
 
             Official sing-box DEFAULT_BUILD_TAGS are preserved.
 
-            Additional build tags:
+            Additional build tag:
             - with_purego
-            - with_v2ray_api
 
             Architectures:
             - Linux amd64
@@ -556,3 +586,4 @@ jobs:
             release/sing-box-linux-arm64.tar.gz
 
           fail_on_unmatched_files: true
+          
