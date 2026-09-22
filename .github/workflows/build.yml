@@ -1,63 +1,25 @@
-name: Build sing-box
+name: Find sing-box-lx XHTTP commits
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 2 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  get-version:
+  find-xhttp-commits:
     runs-on: ubuntu-24.04
-    outputs:
-      upstream_version: ${{ steps.version.outputs.upstream_version }}
-      lx_tag: ${{ steps.version.outputs.lx_tag }}
-    steps:
-      - name: Get latest stable versions
-        id: version
-        run: |
-          set -euo pipefail
-
-          UPSTREAM_VERSION="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
-
-          [ -n "$UPSTREAM_VERSION" ] || exit 1
-
-          LX_TAG="$(git ls-remote --tags --refs https://github.com/Leadaxe/sing-box-lx.git "v${UPSTREAM_VERSION}-lx.*" | awk -F/ '{print $3}' | sort -V | tail -n1)"
-
-          [ -n "$LX_TAG" ] || {
-            echo "No sing-box-lx release found for v${UPSTREAM_VERSION}"
-            exit 1
-          }
-
-          echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "lx_tag=${LX_TAG}" >> "$GITHUB_OUTPUT"
-
-          echo "Official: v${UPSTREAM_VERSION}"
-          echo "LX: ${LX_TAG}"
-
-  build:
-    needs: get-version
-    runs-on: ubuntu-24.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - amd64
-          - arm64
 
     steps:
       - name: Checkout official sing-box
         uses: actions/checkout@v5
         with:
           repository: SagerNet/sing-box
-          ref: v${{ needs.get-version.outputs.upstream_version }}
+          ref: v1.14.1
           fetch-depth: 1
           submodules: recursive
 
-      - name: Add sing-box-lx
+      - name: Fetch sing-box-lx
         run: |
           set -euxo pipefail
 
@@ -65,17 +27,64 @@ jobs:
 
           git fetch \
             --no-tags \
-            --depth=1 \
+            --depth=500 \
             lx \
-            ${{ needs.get-version.outputs.lx_tag }}
+            v1.14.1-lx.8
 
-      - name: Merge XHTTP
+          echo "========================================"
+          echo "Official:"
+          git rev-parse HEAD
+          echo "========================================"
+
+          echo "LX:"
+          git rev-parse FETCH_HEAD
+          echo "========================================"
+
+      - name: Show LX commits
         run: |
           set -euxo pipefail
 
-          mkdir -p /tmp/xhttp-patch
+          echo
+          echo "========================================"
+          echo "ALL LX COMMITS"
+          echo "========================================"
+          git log \
+            --oneline \
+            --decorate \
+            --no-merges \
+            HEAD..FETCH_HEAD
+
+          echo
+          echo "========================================"
+          echo "XHTTP RELATED COMMITS"
+          echo "========================================"
+
+          git log \
+            --oneline \
+            --decorate \
+            --no-merges \
+            HEAD..FETCH_HEAD \
+            -- \
+            option/v2ray_xhttp.go \
+            option/v2ray_transport.go \
+            include/v2rayxhttp.go \
+            transport/v2rayxhttp \
+            transport/v2ray/transport.go \
+            transport/v2ray/registry.go \
+            common/badh2 \
+            constant/v2ray.go
+
+      - name: Show XHTTP changed files
+        run: |
+          set -euxo pipefail
+
+          echo
+          echo "========================================"
+          echo "XHTTP RELATED FILE CHANGES"
+          echo "========================================"
 
           git diff \
+            --name-status \
             HEAD \
             FETCH_HEAD \
             -- \
@@ -86,123 +95,101 @@ jobs:
             transport/v2ray/transport.go \
             transport/v2ray/registry.go \
             common/badh2 \
-            > /tmp/xhttp-patch/xhttp.patch
+            constant/v2ray.go
 
-          if [ ! -s /tmp/xhttp-patch/xhttp.patch ]; then
-            echo "XHTTP patch is empty"
-            exit 1
-          fi
-
-          git apply --3way /tmp/xhttp-patch/xhttp.patch
-
-          rm -rf /tmp/xhttp-patch
-
-          test -f option/v2ray_xhttp.go
-          test -f include/v2rayxhttp.go
-          test -d transport/v2rayxhttp
-          test -d common/badh2
-
-          echo "XHTTP merge completed"
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.8"
-
-      - name: Build
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
+      - name: Show detailed XHTTP commits
         run: |
           set -euxo pipefail
 
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            GOARCH=amd64
-          else
-            GOARCH=arm64
-          fi
+          echo
+          echo "========================================"
+          echo "DETAILED XHTTP COMMITS"
+          echo "========================================"
 
-          TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_purego,with_xhttp,with_v2ray_api"
-          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+          for commit in $(git log \
+            --format='%H' \
+            --reverse \
+            HEAD..FETCH_HEAD \
+            -- \
+            option/v2ray_xhttp.go \
+            option/v2ray_transport.go \
+            include/v2rayxhttp.go \
+            transport/v2rayxhttp \
+            transport/v2ray/transport.go \
+            transport/v2ray/registry.go \
+            common/badh2 \
+            constant/v2ray.go
+          ); do
 
-          echo "Official version: ${{ needs.get-version.outputs.upstream_version }}"
-          echo "LX version: ${{ needs.get-version.outputs.lx_tag }}"
-          echo "Architecture: ${GOARCH}"
-          echo "Build tags: ${TAGS}"
+            echo
+            echo "----------------------------------------"
+            echo "COMMIT: ${commit}"
+            git show \
+              --no-renames \
+              --format=fuller \
+              --stat \
+              "${commit}"
 
-          go mod download
+            echo
+            echo "FILES:"
+            git diff-tree \
+              --no-commit-id \
+              --name-status \
+              -r \
+              "${commit}"
+          done
 
-          go build -v -trimpath \
-            -o "sing-box-linux-${{ matrix.arch }}" \
-            -tags "${TAGS}" \
-            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.get-version.outputs.upstream_version }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
-            ./cmd/sing-box
-
-      - name: Check build
+      - name: Show exact XHTTP diff summary
         run: |
           set -euxo pipefail
 
-          chmod +x "sing-box-linux-${{ matrix.arch }}"
+          echo
+          echo "========================================"
+          echo "EXACT XHTTP DIFF SUMMARY"
+          echo "========================================"
 
-          "./sing-box-linux-${{ matrix.arch }}" version
+          git diff \
+            --stat \
+            HEAD \
+            FETCH_HEAD \
+            -- \
+            option/v2ray_xhttp.go \
+            option/v2ray_transport.go \
+            include/v2rayxhttp.go \
+            transport/v2rayxhttp \
+            transport/v2ray/transport.go \
+            transport/v2ray/registry.go \
+            common/badh2 \
+            constant/v2ray.go
 
-          ls -lh "sing-box-linux-${{ matrix.arch }}"
-          file "sing-box-linux-${{ matrix.arch }}"
+          echo
+          echo "========================================"
+          echo "XmuxRange"
+          echo "========================================"
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: sing-box-${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi-linux-${{ matrix.arch }}
-          path: sing-box-linux-${{ matrix.arch }}
-          retention-days: 90
+          git grep -n "XmuxRange" FETCH_HEAD -- \
+            ':!docs' \
+            ':!SPECS' \
+            || true
 
-  release:
-    needs:
-      - get-version
-      - build
+          echo
+          echo "========================================"
+          echo "V2RayTransportTypeXHTTP"
+          echo "========================================"
 
-    runs-on: ubuntu-24.04
+          git grep -n "V2RayTransportTypeXHTTP" FETCH_HEAD -- \
+            ':!docs' \
+            ':!SPECS' \
+            || true
 
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v5
-        with:
-          path: release-files
+          echo
+          echo "========================================"
+          echo "common/badh2"
+          echo "========================================"
 
-      - name: Prepare release
-        run: |
-          set -euxo pipefail
+          git ls-tree -r --name-only FETCH_HEAD | grep '^common/badh2/' || true
 
-          mkdir -p release
-
-          find release-files \
-            -type f \
-            -name 'sing-box-linux-*' \
-            -exec cp {} release/ \;
-
-          ls -lh release
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi
-          name: sing-box v${{ needs.get-version.outputs.upstream_version }} XHTTP + V2Ray API
-
-          body: |
-            Official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}
-
-            XHTTP source:
-            Leadaxe/sing-box-lx ${{ needs.get-version.outputs.lx_tag }}
-
-            Build:
-            Official sing-box features preserved.
-            Added with_purego for CGO disabled builds.
-            Added with_xhttp.
-            Added with_v2ray_api.
-
-            Architectures:
-            Linux amd64
-            Linux arm64
-
-          files: release/*
-          make_latest: false
+          echo
+          echo "========================================"
+          echo "DONE"
+          echo "========================================"
