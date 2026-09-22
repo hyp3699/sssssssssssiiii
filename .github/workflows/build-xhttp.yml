@@ -607,36 +607,62 @@ jobs:
       # ============================================================
 
       - name: Compile patched packages
-        shell: bash
-        run: |
-          set -euo pipefail
+  shell: bash
+  run: |
+    set -euo pipefail
+    echo "Host toolchain:"
+    go version
+    go env GOOS GOARCH CGO_ENABLED
+    echo
+    echo "Downloading modules..."
+    go mod download
+    echo
+    echo "Testing option package..."
+    go test -run '^$' ./option
+    echo
+    echo "Testing transport/v2ray package..."
+    go test -run '^$' ./transport/v2ray
+    echo
+    echo "Patched packages compiled successfully."
 
-          echo "Host toolchain:"
-          go version
-          go env GOOS GOARCH CGO_ENABLED
+- name: Debug XHTTP integration
+  shell: bash
+  run: |
+    set -euo pipefail
 
-          echo
-          echo "Downloading modules..."
+    echo "========== sing-xhttp version =========="
+    grep -n -A3 -B2 'justinwoo280/sing-xhttp' go.mod || true
 
-          go mod download
+    XHTTP_VERSION="$(go list -m -f '{{.Version}}' github.com/justinwoo280/sing-xhttp)"
+    echo "Resolved XHTTP version: $XHTTP_VERSION"
 
-          echo
-          echo "Testing option package..."
+    echo
+    echo "========== transport/v2ray/xhttp.go =========="
+    sed -n '1,260p' transport/v2ray/xhttp.go
 
-          go test \
-            -run '^$' \
-            ./option
+    echo
+    echo "========== option/v2ray_transport.go XHTTP =========="
+    grep -n -B20 -A100 'XHTTP' option/v2ray_transport.go || true
 
-          echo
-          echo "Testing transport/v2ray package..."
+    echo
+    echo "========== transport/v2ray/transport.go XHTTP =========="
+    grep -n -B20 -A60 'V2RayTransportTypeXHTTP' transport/v2ray/transport.go || true
 
-          go test \
-            -run '^$' \
-            ./transport/v2ray
+    echo
+    echo "========== sing-xhttp source =========="
+    XHTTP_DIR="$(go env GOPATH)/pkg/mod/github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
 
-          echo
-          echo "Patched packages compiled successfully."
+    echo "XHTTP_DIR=$XHTTP_DIR"
 
+    echo
+    echo "--- Go files ---"
+    find "$XHTTP_DIR" -type f -name '*.go' -print | sort
+
+    echo
+    echo "--- NewServer / NewClient ---"
+    grep -Rni -B20 -A60 \
+      'func NewServer\|func NewClient' \
+      "$XHTTP_DIR" || true
       # ============================================================
       # Official build settings
       # ============================================================
