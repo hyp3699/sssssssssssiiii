@@ -54,20 +54,14 @@ jobs:
           set -euxo pipefail
           git remote add lx https://github.com/Leadaxe/sing-box-lx.git
           git fetch --no-tags --depth=1 lx ${{ needs.get-version.outputs.lx_tag }}
-          git fetch --no-tags --depth=1 origin v${{ needs.get-version.outputs.upstream_version }}
 
       - name: Merge XHTTP
         run: |
           set -euxo pipefail
-          UPSTREAM="v${{ needs.get-version.outputs.upstream_version }}"
-          LX="${{ needs.get-version.outputs.lx_tag }}"
-          git fetch --no-tags lx "$LX"
-
           mkdir -p /tmp/xhttp-patch
-
           git diff \
-            "$UPSTREAM" \
-            "lx/$LX" \
+            HEAD \
+            FETCH_HEAD \
             -- \
             option/v2ray_xhttp.go \
             option/v2ray_transport.go \
@@ -76,20 +70,15 @@ jobs:
             transport/v2ray/transport.go \
             transport/v2ray/registry.go \
             > /tmp/xhttp-patch/xhttp.patch
-
           if [ ! -s /tmp/xhttp-patch/xhttp.patch ]; then
             echo "XHTTP patch is empty"
             exit 1
           fi
-
           git apply --3way /tmp/xhttp-patch/xhttp.patch
-
           rm -rf /tmp/xhttp-patch
-
           test -f option/v2ray_xhttp.go
           test -f include/v2rayxhttp.go
           test -d transport/v2rayxhttp
-
           echo "XHTTP merge completed"
 
       - name: Setup Go
@@ -103,23 +92,18 @@ jobs:
           GOOS: linux
         run: |
           set -euxo pipefail
-
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             GOARCH=amd64
           else
             GOARCH=arm64
           fi
-
           TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_xhttp,with_v2ray_api"
           LDFLAGS_SHARED="$(cat release/LDFLAGS)"
-
           echo "Official version: ${{ needs.get-version.outputs.upstream_version }}"
           echo "LX version: ${{ needs.get-version.outputs.lx_tag }}"
           echo "Architecture: ${GOARCH}"
           echo "Build tags: ${TAGS}"
-
           go mod download
-
           go build -v -trimpath \
             -o "sing-box-linux-${{ matrix.arch }}" \
             -tags "${TAGS}" \
