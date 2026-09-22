@@ -85,48 +85,52 @@ jobs:
             lx \
             "refs/tags/${{ needs.get-version.outputs.lx_tag }}:refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }}"
 
-      - name: Import XHTTP only
+          LX_COMMIT="$(git rev-parse refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }})"
+
+          echo "LX commit: ${LX_COMMIT}"
+
+      - name: Import XHTTP with three-way file merge
         shell: bash
         run: |
           set -euo pipefail
 
           OFFICIAL_COMMIT="$(git rev-parse HEAD)"
-          LX_REF="refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }}"
-          LX_COMMIT="$(git rev-parse "$LX_REF")"
+          LX_COMMIT="$(git rev-parse refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }})"
 
-          echo "Official commit: ${OFFICIAL_COMMIT}"
-          echo "LX commit: ${LX_COMMIT}"
+          echo "Official commit:"
+          echo "  ${OFFICIAL_COMMIT}"
+
+          echo "LX commit:"
+          echo "  ${LX_COMMIT}"
 
           if ! git merge-base --is-ancestor "$OFFICIAL_COMMIT" "$LX_COMMIT"; then
             echo "ERROR: LX tag is not based on the official version."
-            echo "Official: ${OFFICIAL_COMMIT}"
-            echo "LX: ${LX_COMMIT}"
             exit 1
           fi
 
-          XHTTP_PATCH="/tmp/xhttp.patch"
-          XHTTP_APPLIED="/tmp/xhttp-applied-commits"
+          WORK="/tmp/singbox-xhttp"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
 
-          : > "$XHTTP_APPLIED"
+          XHTTP_COMMITS_FILE="$WORK/xhttp-commits"
 
-          ALLOWED_REGEX='^(common/badh2/|include/v2rayxhttp\.go$|option/v2ray_xhttp.*\.go$|transport/v2rayxhttp/|constant/v2ray\.go$|option/v2ray_transport\.go$|transport/v2ray/(registry|transport)\.go$)'
+          : > "$XHTTP_COMMITS_FILE"
 
-          echo "Scanning LX history for XHTTP commits..."
+          echo "Scanning LX history..."
 
           mapfile -t ALL_COMMITS < <(
-            git rev-list --reverse \
+            git rev-list \
+              --reverse \
               "${OFFICIAL_COMMIT}..${LX_COMMIT}"
           )
 
           [ "${#ALL_COMMITS[@]}" -gt 0 ] || {
-            echo "ERROR: No commits between official and LX."
+            echo "ERROR: No LX commits found."
             exit 1
           }
 
-          APPLIED_COUNT=0
-
           for COMMIT in "${ALL_COMMITS[@]}"; do
-            mapfile -t CHANGED_FILES < <(
+            mapfile -t FILES < <(
               git diff-tree \
                 --no-commit-id \
                 --name-only \
@@ -134,11 +138,11 @@ jobs:
                 "$COMMIT"
             )
 
-            [ "${#CHANGED_FILES[@]}" -gt 0 ] || continue
+            [ "${#FILES[@]}" -gt 0 ] || continue
 
             IS_XHTTP=0
 
-            for FILE in "${CHANGED_FILES[@]}"; do
+            for FILE in "${FILES[@]}"; do
               case "$FILE" in
                 common/badh2/*)
                   IS_XHTTP=1
@@ -159,7 +163,6 @@ jobs:
               PATCH_TEXT="$(
                 git show \
                   --format= \
-                  --no-ext-diff \
                   --unified=0 \
                   "$COMMIT" \
                   -- \
@@ -170,92 +173,199 @@ jobs:
               )"
 
               if printf '%s\n' "$PATCH_TEXT" |
-                grep -Eq 'V2RayTransportTypeXHTTP|XHTTPOptions|v2rayxhttp|v2ray_xhttp|with_xhttp|XHTTP'; then
+                grep -Eq \
+                'V2RayTransportTypeXHTTP|XHTTPOptions|v2rayxhttp|v2ray_xhttp|with_xhttp|XmuxRange'; then
                 IS_XHTTP=1
               fi
             fi
 
-            [ "$IS_XHTTP" -eq 1 ] || continue
+            if [ "$IS_XHTTP" -eq 1 ]; then
+              SUBJECT="$(git show -s --format='%s' "$COMMIT")"
 
-            SUBJECT="$(git show -s --format='%s' "$COMMIT")"
+              echo "${COMMIT}|${SUBJECT}" >> "$XHTTP_COMMITS_FILE"
+            fi
+          done
+
+          XHTTP_COUNT="$(wc -l < "$XHTTP_COMMITS_FILE")"
+
+          echo
+          echo "XHTTP commits found: ${XHTTP_COUNT}"
+
+          [ "$XHTTP_COUNT" -gt 0 ] || {
+            echo "ERROR: No XHTTP commits found."
+            exit 1
+          }
+
+          cat "$XHTTP_COMMITS_FILE"
+
+          ALLOWED_REGEX='^(common/badh2/|include/v2rayxhttp\.go$|option/v2ray_xhttp.*\.go$|transport/v2rayxhttp/|constant/v2ray\.go$|option/v2ray_transport\.go$|transport/v2ray/(registry|transport)\.go$)'
+
+          APPLIED=0
+
+          while IFS='|' read -r COMMIT SUBJECT; do
 
             echo
             echo "=================================================="
-            echo "XHTTP commit: ${COMMIT}"
+            echo "Applying XHTTP commit"
+            echo "Commit : ${COMMIT}"
             echo "Subject: ${SUBJECT}"
             echo "=================================================="
 
-            echo "Changed files:"
-            printf '  %s\n' "${CHANGED_FILES[@]}"
+            PARENT="$(git rev-parse "${COMMIT}^")"
 
-            rm -f "$XHTTP_PATCH"
+            mapfile -t COMMIT_FILES < <(
+              git diff-tree \
+                --no-commit-id \
+                --name-only \
+                -r \
+                "$COMMIT"
+            )
 
-            git show \
-              --format= \
-              --binary \
-              "$COMMIT" \
-              -- \
-              ':(glob)common/badh2/**' \
-              include/v2rayxhttp.go \
-              ':(glob)option/v2ray_xhttp*.go' \
-              ':(glob)transport/v2rayxhttp/**' \
-              constant/v2ray.go \
-              option/v2ray_transport.go \
-              transport/v2ray/registry.go \
-              transport/v2ray/transport.go \
-              > "$XHTTP_PATCH"
+            for FILE in "${COMMIT_FILES[@]}"; do
 
-            if [ ! -s "$XHTTP_PATCH" ]; then
-              echo "No XHTTP code patch in ${COMMIT}, skipping."
-              continue
-            fi
-
-            BEFORE="$(git rev-parse HEAD)"
-
-            if ! git apply \
-              --3way \
-              --index \
-              "$XHTTP_PATCH"; then
+              if [[ ! "$FILE" =~ $ALLOWED_REGEX ]]; then
+                continue
+              fi
 
               echo
-              echo "ERROR: XHTTP patch could not be applied."
-              echo "Commit: ${COMMIT}"
-              echo "Subject: ${SUBJECT}"
-              echo
-              echo "Resetting to:"
-              echo "  ${BEFORE}"
+              echo "Processing:"
+              echo "  ${FILE}"
 
-              git reset --hard "$BEFORE"
-              exit 1
-            fi
+              CURRENT="$WORK/current"
+              BASE="$WORK/base"
+              THEIRS="$WORK/theirs"
+              RESULT="$WORK/result"
 
-            git reset
+              rm -f \
+                "$CURRENT" \
+                "$BASE" \
+                "$THEIRS" \
+                "$RESULT"
 
-            echo "${COMMIT} ${SUBJECT}" >> "$XHTTP_APPLIED"
-            APPLIED_COUNT=$((APPLIED_COUNT + 1))
+              if [ -f "$FILE" ]; then
+                cp "$FILE" "$CURRENT"
+              else
+                : > "$CURRENT"
+              fi
 
-            echo "Applied XHTTP patch successfully."
-          done
+              if git cat-file -e "${PARENT}:${FILE}" 2>/dev/null; then
+                git show "${PARENT}:${FILE}" > "$BASE"
+              else
+                : > "$BASE"
+              fi
+
+              if git cat-file -e "${COMMIT}:${FILE}" 2>/dev/null; then
+                git show "${COMMIT}:${FILE}" > "$THEIRS"
+              else
+                : > "$THEIRS"
+              fi
+
+              BASE_SIZE="$(wc -c < "$BASE")"
+              THEIRS_SIZE="$(wc -c < "$THEIRS")"
+              CURRENT_SIZE="$(wc -c < "$CURRENT")"
+
+              if [ "$BASE_SIZE" -eq 0 ] && [ "$THEIRS_SIZE" -gt 0 ]; then
+                echo "New file from LX:"
+                echo "  ${FILE}"
+
+                mkdir -p "$(dirname "$FILE")"
+                cp "$THEIRS" "$FILE"
+                continue
+              fi
+
+              if [ "$THEIRS_SIZE" -eq 0 ]; then
+                echo "LX deleted:"
+                echo "  ${FILE}"
+
+                rm -f "$FILE"
+                continue
+              fi
+
+              if [ "$CURRENT_SIZE" -eq 0 ]; then
+                echo "Official file does not exist; using LX version:"
+                echo "  ${FILE}"
+
+                mkdir -p "$(dirname "$FILE")"
+                cp "$THEIRS" "$FILE"
+                continue
+              fi
+
+              if cmp -s "$CURRENT" "$BASE"; then
+                echo "Official file unchanged from LX base."
+                echo "Using LX version."
+
+                cp "$THEIRS" "$FILE"
+                continue
+              fi
+
+              if cmp -s "$BASE" "$THEIRS"; then
+                echo "LX made no effective change."
+                continue
+              fi
+
+              echo "Three-way merging:"
+              echo "  Ours  = official current"
+              echo "  Base  = LX parent"
+              echo "  Theirs = LX XHTTP commit"
+
+              if ! git merge-file \
+                -p \
+                "$CURRENT" \
+                "$BASE" \
+                "$THEIRS" \
+                > "$RESULT"; then
+
+                echo
+                echo "ERROR: Three-way merge failed."
+                echo "Commit: ${COMMIT}"
+                echo "File: ${FILE}"
+
+                echo
+                echo "Conflict markers:"
+                grep -n \
+                  -E \
+                  '^(<<<<<<<|=======|>>>>>>>)' \
+                  "$RESULT" || true
+
+                exit 1
+              fi
+
+              if grep -q \
+                -E \
+                '^(<<<<<<<|=======|>>>>>>>)' \
+                "$RESULT"; then
+
+                echo
+                echo "ERROR: Unresolved merge conflict:"
+                echo "  ${FILE}"
+                exit 1
+              fi
+
+              cp "$RESULT" "$FILE"
+
+              echo "Merged successfully:"
+              echo "  ${FILE}"
+
+            done
+
+            APPLIED=$((APPLIED + 1))
+
+          done < "$XHTTP_COMMITS_FILE"
 
           echo
           echo "=================================================="
           echo "XHTTP import completed"
           echo "=================================================="
 
-          echo "Applied XHTTP commits: ${APPLIED_COUNT}"
-
-          if [ "$APPLIED_COUNT" -eq 0 ]; then
-            echo "ERROR: No XHTTP commits were applied."
-            exit 1
-          fi
+          echo "Applied commits: ${APPLIED}"
 
           echo
-          echo "Applied commits:"
-          cat "$XHTTP_APPLIED"
+          echo "Changed files:"
+          git status --short
 
           echo
-          echo "Final changed files:"
-          git diff --name-only "$OFFICIAL_COMMIT"
+          echo "Diffstat:"
+          git diff --stat "$OFFICIAL_COMMIT"
 
           mapfile -t FINAL_FILES < <(
             git diff --name-only "$OFFICIAL_COMMIT"
@@ -271,7 +381,7 @@ jobs:
           done
 
           echo
-          echo "Allowed XHTTP file verification passed."
+          echo "Final XHTTP file whitelist check passed."
 
           test -f option/v2ray_xhttp.go
           test -f option/v2ray_xhttp_xmux_range.go
@@ -282,42 +392,27 @@ jobs:
           echo
           echo "Required XHTTP files verified."
 
-      - name: Verify no unrelated LX features
+      - name: Verify XHTTP symbols
         shell: bash
         run: |
           set -euo pipefail
 
-          OFFICIAL_COMMIT="$(git rev-parse HEAD~0)"
+          echo "Checking XHTTP source..."
 
-          echo "Checking working tree..."
-
-          git status --short
-
-          echo
-          echo "XHTTP-related source files:"
-
-          find \
-            common/badh2 \
-            transport/v2rayxhttp \
+          grep -R \
+            -n \
+            -E \
+            'V2RayTransportTypeXHTTP|XmuxRange|v2rayxhttp' \
             option \
-            include \
             constant \
             transport/v2ray \
-            -maxdepth 3 \
-            -type f \
-            \( \
-              -path '*/badh2/*' -o \
-              -path '*/v2rayxhttp/*' -o \
-              -name 'v2ray_xhttp.go' -o \
-              -name 'v2ray_xhttp_xmux_range.go' -o \
-              -name 'v2ray_xhttp_xmux_range_test.go' -o \
-              -name 'v2rayxhttp.go' \
-            \) \
+            transport/v2rayxhttp \
+            include \
             2>/dev/null |
-            sort || true
+            head -n 100 || true
 
           echo
-          echo "Unrelated LX feature paths are not intentionally imported."
+          echo "XHTTP source check completed."
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -423,7 +518,6 @@ jobs:
             release/sing-box-linux-amd64 \
             release/sing-box-linux-arm64
 
-          echo "Release files:"
           ls -lh release
 
       - name: Create Release
@@ -451,8 +545,7 @@ jobs:
 
             LX-only features such as AWG, lx_command, lxd, lx_chain and MASQUE are not intentionally included.
 
-            XHTTP is imported from the LX history as filtered source patches.
-            Only XHTTP-related files are allowed to modify the official source tree.
+            XHTTP is imported using three-way file merging from the LX XHTTP history.
 
           files: |
             release/sing-box-linux-amd64
