@@ -13,9 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       upstream_version: ${{ steps.version.outputs.upstream_version }}
-      lx_tag: ${{ steps.version.outputs.lx_tag }}
     steps:
-      - name: Get latest stable versions
+      - name: Get latest official stable version
         id: version
         shell: bash
         run: |
@@ -32,25 +31,9 @@ jobs:
             exit 1
           }
 
-          LX_TAG="$(
-            git ls-remote --tags --refs \
-              https://github.com/Leadaxe/sing-box-lx.git \
-              "refs/tags/v${UPSTREAM_VERSION}-lx.*" |
-            awk -F/ '{print $3}' |
-            sort -V |
-            tail -n1
-          )"
-
-          [ -n "$LX_TAG" ] || {
-            echo "No matching sing-box-lx tag found for v${UPSTREAM_VERSION}"
-            exit 1
-          }
-
           echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "lx_tag=${LX_TAG}" >> "$GITHUB_OUTPUT"
 
-          echo "Official: v${UPSTREAM_VERSION}"
-          echo "LX: ${LX_TAG}"
+          echo "Official sing-box: v${UPSTREAM_VERSION}"
 
   build:
     needs: get-version
@@ -72,347 +55,306 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Fetch matching sing-box-lx
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          git remote add lx https://github.com/Leadaxe/sing-box-lx.git
-
-          git fetch \
-            --filter=blob:none \
-            --no-tags \
-            lx \
-            "refs/tags/${{ needs.get-version.outputs.lx_tag }}:refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }}"
-
-          LX_COMMIT="$(git rev-parse refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }})"
-
-          echo "LX commit: ${LX_COMMIT}"
-
-      - name: Import XHTTP with three-way file merge
+      - name: Import sing-xhttp
         shell: bash
         run: |
           set -euo pipefail
 
-          OFFICIAL_COMMIT="$(git rev-parse HEAD)"
-          LX_COMMIT="$(git rev-parse refs/remotes/lx/${{ needs.get-version.outputs.lx_tag }})"
+          XHTTP_VERSION="v0.1.6"
 
-          echo "Official commit:"
-          echo "  ${OFFICIAL_COMMIT}"
+          echo "Downloading sing-xhttp ${XHTTP_VERSION}..."
 
-          echo "LX commit:"
-          echo "  ${LX_COMMIT}"
+          mkdir -p transport/v2ray
 
-          if ! git merge-base --is-ancestor "$OFFICIAL_COMMIT" "$LX_COMMIT"; then
-            echo "ERROR: LX tag is not based on the official version."
-            exit 1
-          fi
+          curl -fsSL \
+            "https://raw.githubusercontent.com/justinwoo280/sing-xhttp/${XHTTP_VERSION}/xhttp/adapter.go" \
+            -o /tmp/xhttp_adapter.go
 
-          WORK="/tmp/singbox-xhttp"
-          rm -rf "$WORK"
-          mkdir -p "$WORK"
-
-          XHTTP_COMMITS_FILE="$WORK/xhttp-commits"
-
-          : > "$XHTTP_COMMITS_FILE"
-
-          echo "Scanning LX history..."
-
-          mapfile -t ALL_COMMITS < <(
-            git rev-list \
-              --reverse \
-              "${OFFICIAL_COMMIT}..${LX_COMMIT}"
-          )
-
-          [ "${#ALL_COMMITS[@]}" -gt 0 ] || {
-            echo "ERROR: No LX commits found."
-            exit 1
-          }
-
-          for COMMIT in "${ALL_COMMITS[@]}"; do
-            mapfile -t FILES < <(
-              git diff-tree \
-                --no-commit-id \
-                --name-only \
-                -r \
-                "$COMMIT"
-            )
-
-            [ "${#FILES[@]}" -gt 0 ] || continue
-
-            IS_XHTTP=0
-
-            for FILE in "${FILES[@]}"; do
-              case "$FILE" in
-                common/badh2/*)
-                  IS_XHTTP=1
-                  ;;
-                include/v2rayxhttp.go)
-                  IS_XHTTP=1
-                  ;;
-                option/v2ray_xhttp*.go)
-                  IS_XHTTP=1
-                  ;;
-                transport/v2rayxhttp/*)
-                  IS_XHTTP=1
-                  ;;
-              esac
-            done
-
-            if [ "$IS_XHTTP" -eq 0 ]; then
-              PATCH_TEXT="$(
-                git show \
-                  --format= \
-                  --unified=0 \
-                  "$COMMIT" \
-                  -- \
-                  constant/v2ray.go \
-                  option/v2ray_transport.go \
-                  transport/v2ray/registry.go \
-                  transport/v2ray/transport.go
-              )"
-
-              if printf '%s\n' "$PATCH_TEXT" |
-                grep -Eq \
-                'V2RayTransportTypeXHTTP|XHTTPOptions|v2rayxhttp|v2ray_xhttp|with_xhttp|XmuxRange'; then
-                IS_XHTTP=1
-              fi
-            fi
-
-            if [ "$IS_XHTTP" -eq 1 ]; then
-              SUBJECT="$(git show -s --format='%s' "$COMMIT")"
-
-              echo "${COMMIT}|${SUBJECT}" >> "$XHTTP_COMMITS_FILE"
-            fi
-          done
-
-          XHTTP_COUNT="$(wc -l < "$XHTTP_COMMITS_FILE")"
+          test -s /tmp/xhttp_adapter.go
 
           echo
-          echo "XHTTP commits found: ${XHTTP_COUNT}"
-
-          [ "$XHTTP_COUNT" -gt 0 ] || {
-            echo "ERROR: No XHTTP commits found."
-            exit 1
-          }
-
-          cat "$XHTTP_COMMITS_FILE"
-
-          ALLOWED_REGEX='^(common/badh2/|include/v2rayxhttp\.go$|option/v2ray_xhttp.*\.go$|transport/v2rayxhttp/|constant/v2ray\.go$|option/v2ray_transport\.go$|transport/v2ray/(registry|transport)\.go$)'
-
-          APPLIED=0
-
-          while IFS='|' read -r COMMIT SUBJECT; do
-
-            echo
-            echo "=================================================="
-            echo "Applying XHTTP commit"
-            echo "Commit : ${COMMIT}"
-            echo "Subject: ${SUBJECT}"
-            echo "=================================================="
-
-            PARENT="$(git rev-parse "${COMMIT}^")"
-
-            mapfile -t COMMIT_FILES < <(
-              git diff-tree \
-                --no-commit-id \
-                --name-only \
-                -r \
-                "$COMMIT"
-            )
-
-            for FILE in "${COMMIT_FILES[@]}"; do
-
-              if [[ ! "$FILE" =~ $ALLOWED_REGEX ]]; then
-                continue
-              fi
-
-              echo
-              echo "Processing:"
-              echo "  ${FILE}"
-
-              CURRENT="$WORK/current"
-              BASE="$WORK/base"
-              THEIRS="$WORK/theirs"
-              RESULT="$WORK/result"
-
-              rm -f \
-                "$CURRENT" \
-                "$BASE" \
-                "$THEIRS" \
-                "$RESULT"
-
-              if [ -f "$FILE" ]; then
-                cp "$FILE" "$CURRENT"
-              else
-                : > "$CURRENT"
-              fi
-
-              if git cat-file -e "${PARENT}:${FILE}" 2>/dev/null; then
-                git show "${PARENT}:${FILE}" > "$BASE"
-              else
-                : > "$BASE"
-              fi
-
-              if git cat-file -e "${COMMIT}:${FILE}" 2>/dev/null; then
-                git show "${COMMIT}:${FILE}" > "$THEIRS"
-              else
-                : > "$THEIRS"
-              fi
-
-              BASE_SIZE="$(wc -c < "$BASE")"
-              THEIRS_SIZE="$(wc -c < "$THEIRS")"
-              CURRENT_SIZE="$(wc -c < "$CURRENT")"
-
-              if [ "$BASE_SIZE" -eq 0 ] && [ "$THEIRS_SIZE" -gt 0 ]; then
-                echo "New file from LX:"
-                echo "  ${FILE}"
-
-                mkdir -p "$(dirname "$FILE")"
-                cp "$THEIRS" "$FILE"
-                continue
-              fi
-
-              if [ "$THEIRS_SIZE" -eq 0 ]; then
-                echo "LX deleted:"
-                echo "  ${FILE}"
-
-                rm -f "$FILE"
-                continue
-              fi
-
-              if [ "$CURRENT_SIZE" -eq 0 ]; then
-                echo "Official file does not exist; using LX version:"
-                echo "  ${FILE}"
-
-                mkdir -p "$(dirname "$FILE")"
-                cp "$THEIRS" "$FILE"
-                continue
-              fi
-
-              if cmp -s "$CURRENT" "$BASE"; then
-                echo "Official file unchanged from LX base."
-                echo "Using LX version."
-
-                cp "$THEIRS" "$FILE"
-                continue
-              fi
-
-              if cmp -s "$BASE" "$THEIRS"; then
-                echo "LX made no effective change."
-                continue
-              fi
-
-              echo "Three-way merging:"
-              echo "  Ours  = official current"
-              echo "  Base  = LX parent"
-              echo "  Theirs = LX XHTTP commit"
-
-              if ! git merge-file \
-                -p \
-                "$CURRENT" \
-                "$BASE" \
-                "$THEIRS" \
-                > "$RESULT"; then
-
-                echo
-                echo "ERROR: Three-way merge failed."
-                echo "Commit: ${COMMIT}"
-                echo "File: ${FILE}"
-
-                echo
-                echo "Conflict markers:"
-                grep -n \
-                  -E \
-                  '^(<<<<<<<|=======|>>>>>>>)' \
-                  "$RESULT" || true
-
-                exit 1
-              fi
-
-              if grep -q \
-                -E \
-                '^(<<<<<<<|=======|>>>>>>>)' \
-                "$RESULT"; then
-
-                echo
-                echo "ERROR: Unresolved merge conflict:"
-                echo "  ${FILE}"
-                exit 1
-              fi
-
-              cp "$RESULT" "$FILE"
-
-              echo "Merged successfully:"
-              echo "  ${FILE}"
-
-            done
-
-            APPLIED=$((APPLIED + 1))
-
-          done < "$XHTTP_COMMITS_FILE"
+          echo "sing-xhttp adapter:"
+          sed -n '1,240p' /tmp/xhttp_adapter.go
 
           echo
-          echo "=================================================="
-          echo "XHTTP import completed"
-          echo "=================================================="
+          echo "Adding dependency..."
 
-          echo "Applied commits: ${APPLIED}"
+          go get "github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
 
           echo
-          echo "Changed files:"
-          git status --short
+          echo "Dependency added."
 
-          echo
-          echo "Diffstat:"
-          git diff --stat "$OFFICIAL_COMMIT"
-
-          mapfile -t FINAL_FILES < <(
-            git diff --name-only "$OFFICIAL_COMMIT"
-          )
-
-          for FILE in "${FINAL_FILES[@]}"; do
-            if [[ ! "$FILE" =~ $ALLOWED_REGEX ]]; then
-              echo
-              echo "ERROR: Unexpected file changed:"
-              echo "  ${FILE}"
-              exit 1
-            fi
-          done
-
-          echo
-          echo "Final XHTTP file whitelist check passed."
-
-          test -f option/v2ray_xhttp.go
-          test -f option/v2ray_xhttp_xmux_range.go
-          test -f include/v2rayxhttp.go
-          test -d transport/v2rayxhttp
-          test -d common/badh2
-
-          echo
-          echo "Required XHTTP files verified."
-
-      - name: Verify XHTTP symbols
+      - name: Add XHTTP constant
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking XHTTP source..."
+          FILE="constant/v2ray.go"
+
+          grep -q 'V2RayTransportTypeXHTTP' "$FILE" && {
+            echo "XHTTP constant already exists."
+            exit 0
+          }
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("constant/v2ray.go")
+          text = path.read_text()
+
+          marker = 'V2RayTransportTypeHTTP = "http"'
+
+          if marker not in text:
+              raise SystemExit("Could not find V2Ray HTTP transport constant")
+
+          text = text.replace(
+              marker,
+              marker + '\n\tV2RayTransportTypeXHTTP = "xhttp"',
+              1,
+          )
+
+          path.write_text(text)
+          PY
+
+          grep -n 'V2RayTransportTypeXHTTP' "$FILE"
+
+      - name: Add XHTTP options
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="option/v2ray_transport.go"
+
+          grep -q 'XHTTPOptions' "$FILE" && {
+            echo "XHTTP options already exist."
+            exit 0
+          }
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("option/v2ray_transport.go")
+          text = path.read_text()
+
+          if 'github.com/justinwoo280/sing-xhttp/xhttp' not in text:
+              imports = 'import (\n'
+              pos = text.find(imports)
+
+              if pos == -1:
+                  raise SystemExit("Import block not found")
+
+              text = text[:pos] + (
+                  'import (\n'
+                  '\t"github.com/justinwoo280/sing-xhttp/xhttp"\n'
+              ) + text[pos + len(imports):]
+
+          struct_marker = 'type V2RayTransportOptions struct {'
+
+          if struct_marker not in text:
+              raise SystemExit("V2RayTransportOptions not found")
+
+          pos = text.find(struct_marker)
+
+          brace = text.find("{", pos)
+
+          text = (
+              text[:brace + 1]
+              + '\n\tXHTTPOptions *xhttp.Options `json:"xhttp,omitempty"`'
+              + text[brace + 1:]
+          )
+
+          path.write_text(text)
+          PY
+
+          grep -n 'XHTTPOptions' "$FILE"
+
+      - name: Add XHTTP JSON parsing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="option/v2ray_transport.go"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("option/v2ray_transport.go")
+          text = path.read_text()
+
+          if 'case C.V2RayTransportTypeXHTTP:' in text:
+              print("XHTTP JSON cases already exist.")
+              raise SystemExit(0)
+
+          unmarshal_marker = 'switch transport.Type {'
+
+          if unmarshal_marker not in text:
+              raise SystemExit("Transport type switch not found")
+
+          first = text.find(unmarshal_marker)
+
+          insert = '''
+          \tcase C.V2RayTransportTypeXHTTP:
+          \t\tif transport.XHTTPOptions == nil {
+          \t\t\ttransport.XHTTPOptions = new(xhttp.Options)
+          \t\t}
+          \t\tif err := json.Unmarshal(raw, transport.XHTTPOptions); err != nil {
+          \t\t\treturn err
+          \t\t}
+          '''
+
+          text = text[:first] + text[first:].replace(
+              unmarshal_marker,
+              unmarshal_marker + insert,
+              1,
+          )
+
+          path.write_text(text)
+          PY
+
+          grep -n -A8 -B3 'V2RayTransportTypeXHTTP' "$FILE"
+
+      - name: Add XHTTP transport bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="transport/v2ray/xhttp.go"
+
+          cat > "$FILE" <<'EOF'
+          package v2ray
+
+          import (
+              "context"
+
+              "github.com/sagernet/sing-box/adapter"
+              C "github.com/sagernet/sing-box/constant"
+              "github.com/sagernet/sing-box/option"
+
+              "github.com/justinwoo280/sing-xhttp/xhttp"
+          )
+
+          func newXHTTPServerTransport(
+              ctx context.Context,
+              options *option.V2RayTransportOptions,
+          ) (adapter.V2RayServerTransport, error) {
+              if options == nil || options.XHTTPOptions == nil {
+                  return nil, xhttp.ErrInvalidOptions
+              }
+
+              return xhttp.NewServer(ctx, options.XHTTPOptions)
+          }
+
+          func newXHTTPClientTransport(
+              ctx context.Context,
+              options *option.V2RayTransportOptions,
+          ) (adapter.V2RayClientTransport, error) {
+              if options == nil || options.XHTTPOptions == nil {
+                  return nil, xhttp.ErrInvalidOptions
+              }
+
+              return xhttp.NewClient(ctx, options.XHTTPOptions)
+          }
+
+          var _ = C.V2RayTransportTypeXHTTP
+          EOF
+
+          gofmt -w "$FILE"
+
+          cat "$FILE"
+
+      - name: Patch V2Ray server transport
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="transport/v2ray/transport.go"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("transport/v2ray/transport.go")
+          text = path.read_text()
+
+          if 'case C.V2RayTransportTypeXHTTP:' in text:
+              print("XHTTP server/client cases already exist.")
+              raise SystemExit(0)
+
+          server_marker = 'func NewServerTransport('
+
+          if server_marker not in text:
+              raise SystemExit("NewServerTransport not found")
+
+          server_pos = text.find(server_marker)
+          switch_pos = text.find("switch options.Type", server_pos)
+
+          if switch_pos == -1:
+              switch_pos = text.find("switch transport.Type", server_pos)
+
+          if switch_pos == -1:
+              raise SystemExit("Server transport switch not found")
+
+          brace = text.find("{", switch_pos)
+
+          server_case = '''
+          \n\tcase C.V2RayTransportTypeXHTTP:
+          \t\treturn newXHTTPServerTransport(ctx, options)
+          '''
+
+          text = text[:brace + 1] + server_case + text[brace + 1:]
+
+          client_marker = 'func NewClientTransport('
+
+          if client_marker not in text:
+              raise SystemExit("NewClientTransport not found")
+
+          client_pos = text.find(client_marker)
+          client_switch = text.find("switch options.Type", client_pos)
+
+          if client_switch == -1:
+              client_switch = text.find("switch transport.Type", client_pos)
+
+          if client_switch == -1:
+              raise SystemExit("Client transport switch not found")
+
+          client_brace = text.find("{", client_switch)
+
+          client_case = '''
+          \n\tcase C.V2RayTransportTypeXHTTP:
+          \t\treturn newXHTTPClientTransport(ctx, options)
+          '''
+
+          text = text[:client_brace + 1] + client_case + text[client_brace + 1:]
+
+          path.write_text(text)
+          PY
+
+          gofmt -w "$FILE"
+
+          grep -n -A5 -B3 'V2RayTransportTypeXHTTP' "$FILE"
+
+      - name: Verify XHTTP integration source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking XHTTP integration..."
 
           grep -R \
             -n \
             -E \
-            'V2RayTransportTypeXHTTP|XmuxRange|v2rayxhttp' \
-            option \
-            constant \
-            transport/v2ray \
-            transport/v2rayxhttp \
-            include \
-            2>/dev/null |
-            head -n 100 || true
+            'V2RayTransportTypeXHTTP|XHTTPOptions|NewServer|NewClient' \
+            constant/v2ray.go \
+            option/v2ray_transport.go \
+            transport/v2ray/xhttp.go \
+            transport/v2ray/transport.go
 
           echo
-          echo "XHTTP source check completed."
+          echo "Checking dependency..."
+
+          go list -m github.com/justinwoo280/sing-xhttp
+
+          echo
+          echo "XHTTP source verification completed."
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -435,23 +377,22 @@ jobs:
           fi
 
           OFFICIAL_VERSION="${{ needs.get-version.outputs.upstream_version }}"
-          LX_TAG="${{ needs.get-version.outputs.lx_tag }}"
 
           OFFICIAL_TAGS="$(
             tr '\n' ',' < release/DEFAULT_BUILD_TAGS |
             sed 's/,$//'
           )"
 
-          TAGS="${OFFICIAL_TAGS},with_purego,with_xhttp,with_v2ray_api"
+          TAGS="${OFFICIAL_TAGS},with_purego,with_v2ray_api"
 
           LDFLAGS_SHARED="$(cat release/LDFLAGS)"
 
           echo "Official version: v${OFFICIAL_VERSION}"
-          echo "LX version: ${LX_TAG}"
           echo "Architecture: ${GOARCH}"
           echo "Build tags: ${TAGS}"
           echo "LDFLAGS: ${LDFLAGS_SHARED}"
 
+          go mod tidy
           go mod download
 
           go build -v -trimpath \
@@ -460,7 +401,7 @@ jobs:
             -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
 
-      - name: Check build
+      - name: Check build and XHTTP
         shell: bash
         run: |
           set -euxo pipefail
@@ -470,9 +411,70 @@ jobs:
           "./sing-box-linux-${{ matrix.arch }}" version
 
           echo
+          echo "Checking XHTTP symbols..."
+
+          strings "sing-box-linux-${{ matrix.arch }}" |
+            grep -E 'sing-xhttp|xhttp|V2RayTransportTypeXHTTP' |
+            head -n 100 || true
+
+          echo
           echo "Binary information:"
+
           ls -lh "sing-box-linux-${{ matrix.arch }}"
+
           file "sing-box-linux-${{ matrix.arch }}"
+
+      - name: Test XHTTP inbound and outbound configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/xhttp-test.json <<'EOF'
+          {
+            "inbounds": [
+              {
+                "type": "vless",
+                "tag": "xhttp-in",
+                "listen": "127.0.0.1",
+                "listen_port": 18443,
+                "users": [
+                  {
+                    "name": "xhttp-test",
+                    "uuid": "8a21b0ab-c9a6-4763-bbc5-9a170a8a1869"
+                  }
+                ],
+                "transport": {
+                  "type": "xhttp",
+                  "mode": "packet-up",
+                  "path": "/xhttp"
+                }
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "vless",
+                "tag": "xhttp-out",
+                "server": "127.0.0.1",
+                "server_port": 18443,
+                "uuid": "8a21b0ab-c9a6-4763-bbc5-9a170a8a1869",
+                "transport": {
+                  "type": "xhttp",
+                  "mode": "packet-up",
+                  "path": "/xhttp"
+                }
+              }
+            ]
+          }
+          EOF
+
+          echo "Testing XHTTP inbound + outbound..."
+
+          "./sing-box-linux-${{ matrix.arch }}" \
+            check \
+            -c /tmp/xhttp-test.json
+
+          echo
+          echo "XHTTP inbound/outbound configuration check passed."
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v5
@@ -544,22 +546,27 @@ jobs:
           body: |
             Based on official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}
 
-            XHTTP source:
-            Leadaxe/sing-box-lx ${{ needs.get-version.outputs.lx_tag }}
+            XHTTP:
+            github.com/justinwoo280/sing-xhttp v0.1.6
 
             Build:
             - Official sing-box feature set preserved
             - Added with_purego
-            - Added with_xhttp
+            - Added XHTTP Server
+            - Added XHTTP Client
             - Added with_v2ray_api
+
+            XHTTP:
+            - VLESS inbound + XHTTP
+            - VLESS outbound + XHTTP
+            - Server + Client
+            - Compatible with Xray XHTTP wire format
 
             Architectures:
             - Linux amd64
             - Linux arm64
 
-            LX-only features such as AWG, lx_command, lxd, lx_chain and MASQUE are not intentionally included.
-
-            XHTTP is imported using three-way file merging from the LX XHTTP history.
+            LX-only features are not included.
 
           files: |
             release/sing-box-linux-amd64.tar.gz
