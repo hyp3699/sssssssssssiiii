@@ -73,6 +73,7 @@ jobs:
           - arch: amd64
             goarch: amd64
             output: sing-box-linux-amd64
+
           - arch: arm64
             goarch: arm64
             output: sing-box-linux-arm64
@@ -145,7 +146,7 @@ jobs:
             -o "${{ matrix.output }}" \
             ./cmd/sing-box
 
-            - name: Verify binary
+      - name: Verify binary
         run: |
           set -euo pipefail
 
@@ -156,6 +157,9 @@ jobs:
           echo "======================================"
 
           ls -lh "$BINARY"
+
+          echo
+          echo "文件类型:"
           file "$BINARY"
 
           echo
@@ -168,7 +172,8 @@ jobs:
           else
             echo
             echo "ARM64 为交叉编译产物"
-            echo "当前 Runner 为 AMD64，跳过直接执行测试"
+            echo "当前 GitHub Runner 为 AMD64"
+            echo "跳过 ARM64 直接执行测试"
           fi
 
           echo
@@ -193,6 +198,8 @@ jobs:
             "${{ matrix.output }}.tar.gz" \
             > "${{ matrix.output }}.sha256"
 
+          echo
+          echo "生成文件:"
           ls -lh \
             "${{ matrix.output }}.tar.gz" \
             "${{ matrix.output }}.sha256"
@@ -226,6 +233,10 @@ jobs:
 
           mkdir -p upload
 
+          echo "======================================"
+          echo "下载的构建文件"
+          echo "======================================"
+
           find release -type f -print
 
           find release \
@@ -234,7 +245,10 @@ jobs:
             -exec cp {} upload/ \;
 
           echo
-          echo "Release files:"
+          echo "======================================"
+          echo "Release 文件"
+          echo "======================================"
+
           ls -lh upload
 
       - name: Create Release
