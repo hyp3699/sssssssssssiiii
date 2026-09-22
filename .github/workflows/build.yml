@@ -17,19 +17,21 @@ jobs:
       xhttp_version: ${{ steps.version.outputs.xhttp_version }}
 
     steps:
-      - name: Get latest stable versions
+      - name: Get latest versions
         id: version
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "==> Getting latest official sing-box release..."
+          echo "=========================================="
+          echo "Getting latest official sing-box release"
+          echo "=========================================="
 
           UPSTREAM_VERSION="$(
             curl -fsSL \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              https://api.github.com/repos/SagerNet/sing-box/releases/latest |
+              "https://api.github.com/repos/SagerNet/sing-box/releases/latest" |
             jq -r '.tag_name'
           )"
 
@@ -41,7 +43,7 @@ jobs:
           case "$UPSTREAM_VERSION" in
             v*) ;;
             *)
-              echo "ERROR: Unexpected sing-box release tag: $UPSTREAM_VERSION"
+              echo "ERROR: Invalid sing-box release tag: $UPSTREAM_VERSION"
               exit 1
               ;;
           esac
@@ -49,34 +51,32 @@ jobs:
           echo "Official sing-box: $UPSTREAM_VERSION"
 
 
-          echo "==> Getting latest sing-xhttp release..."
+          echo
+          echo "=========================================="
+          echo "Getting latest sing-xhttp tag"
+          echo "=========================================="
 
           XHTTP_VERSION="$(
-            curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              https://api.github.com/repos/justinwoo280/sing-xhttp/releases/latest |
-            jq -r '.tag_name'
+            git ls-remote \
+              --tags \
+              --refs \
+              "https://github.com/justinwoo280/sing-xhttp.git" |
+            awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+(\.[0-9]+)?([.-].*)?$/ {print $NF}' |
+            sort -V |
+            tail -n 1
           )"
 
-          if [ -z "$XHTTP_VERSION" ] || [ "$XHTTP_VERSION" = "null" ]; then
-            echo "ERROR: Failed to detect latest sing-xhttp release."
+          if [ -z "$XHTTP_VERSION" ]; then
+            echo "ERROR: Failed to detect latest sing-xhttp tag."
             exit 1
           fi
 
-          case "$XHTTP_VERSION" in
-            v*) ;;
-            *)
-              echo "ERROR: Unexpected sing-xhttp release tag: $XHTTP_VERSION"
-              exit 1
-              ;;
-          esac
-
-          echo "sing-xhttp: $XHTTP_VERSION"
+          echo "Latest sing-xhttp: $XHTTP_VERSION"
 
 
           echo "upstream_version=${UPSTREAM_VERSION#v}" >> "$GITHUB_OUTPUT"
           echo "xhttp_version=${XHTTP_VERSION}" >> "$GITHUB_OUTPUT"
+
 
   build:
     needs: get-version
@@ -99,13 +99,15 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify required files
+
+      - name: Verify official source files
         shell: bash
         run: |
           set -euo pipefail
@@ -118,12 +120,12 @@ jobs:
             release/LDFLAGS
           do
             if [ ! -f "$file" ]; then
-              echo "ERROR: Required file does not exist: $file"
+              echo "ERROR: Required file not found: $file"
               exit 1
             fi
           done
 
-          echo "All required official sing-box files exist."
+          echo "All required files exist."
 
 
       - name: Add latest sing-xhttp dependency
@@ -133,7 +135,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Using sing-xhttp ${XHTTP_VERSION}"
+          echo "sing-xhttp version: ${XHTTP_VERSION}"
 
           go mod edit \
             -require="github.com/justinwoo280/sing-xhttp@${XHTTP_VERSION}"
@@ -159,7 +161,8 @@ jobs:
 
               if count != 1:
                   raise SystemExit(
-                      f"ERROR: {description}: expected exactly 1 match, found {count}"
+                      f"ERROR: {description}: "
+                      f"expected exactly 1 match, found {count}"
                   )
 
               path.write_text(source.replace(old, new, 1))
@@ -168,24 +171,25 @@ jobs:
 
 
           # ============================================================
-          # 1. constant/v2ray.go
+          # constant/v2ray.go
           # ============================================================
 
           replace_exact(
               "constant/v2ray.go",
 
-              '''\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"\n''',
+              '''\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"
+          ''',
 
               '''\tV2RayTransportTypeHTTPUpgrade = "httpupgrade"
           \tV2RayTransportTypeXHTTP = "xhttp"
-          \n''',
+          ''',
 
-              "Add V2RayTransportTypeXHTTP"
+              "Add XHTTP transport constant"
           )
 
 
           # ============================================================
-          # 2. option/v2ray_transport.go
+          # option/v2ray_transport.go
           # ============================================================
 
           replace_exact(
@@ -285,7 +289,7 @@ jobs:
 
 
           # ============================================================
-          # 3. transport/v2ray/transport.go
+          # transport/v2ray/transport.go
           # ============================================================
 
           replace_exact(
@@ -342,14 +346,14 @@ jobs:
           )
 
 
-          print("")
+          print()
           print("==========================================")
-          print("All XHTTP source replacements succeeded.")
+          print("All source replacements completed.")
           print("==========================================")
           PY
 
 
-      - name: Format modified source
+      - name: Format modified Go files
         shell: bash
         run: |
           set -euo pipefail
@@ -360,51 +364,46 @@ jobs:
             transport/v2ray/transport.go
 
 
-      - name: Verify XHTTP integration
+      - name: Verify XHTTP modifications
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "==> Checking constant..."
+          echo "Checking XHTTP constant..."
           grep -F \
             'V2RayTransportTypeXHTTP = "xhttp"' \
             constant/v2ray.go
 
-
-          echo "==> Checking XHTTP options..."
+          echo "Checking XHTTP options..."
           grep -F \
             'XHTTPOptions       xhttp.Options' \
             option/v2ray_transport.go
 
-
-          echo "==> Checking MarshalJSON..."
+          echo "Checking XHTTP JSON handling..."
           grep -F \
             'case C.V2RayTransportTypeXHTTP:' \
             option/v2ray_transport.go
 
-
-          echo "==> Checking schema..."
+          echo "Checking XHTTP schema..."
           grep -F \
             'reflect.TypeFor[xhttp.Options]()' \
             option/v2ray_transport.go
 
-
-          echo "==> Checking XHTTP server..."
+          echo "Checking XHTTP server..."
           grep -F \
             'xhttp.NewServer' \
             transport/v2ray/transport.go
 
-
-          echo "==> Checking XHTTP client..."
+          echo "Checking XHTTP client..."
           grep -F \
             'xhttp.NewClient' \
             transport/v2ray/transport.go
 
-
+          echo
           echo "All XHTTP integration points verified."
 
 
-      - name: Download dependencies
+      - name: Download Go dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -441,9 +440,11 @@ jobs:
           echo "Official build tags:"
           echo "$OFFICIAL_TAGS"
 
-          echo "Official linker flags:"
+          echo
+          echo "Official LDFLAGS:"
           cat release/LDFLAGS
 
+          echo
           echo "official_tags=${OFFICIAL_TAGS}" >> "$GITHUB_OUTPUT"
 
 
@@ -463,11 +464,16 @@ jobs:
           mkdir -p release/package
 
           echo "=========================================="
-          echo "Building sing-box"
-          echo "Version : v${OFFICIAL_VERSION}"
-          echo "Arch    : ${TARGET_ARCH}"
-          echo "Tags    : ${TAGS}"
+          echo "Build configuration"
           echo "=========================================="
+          echo "sing-box : v${OFFICIAL_VERSION}"
+          echo "XHTTP    : ${{ needs.get-version.outputs.xhttp_version }}"
+          echo "GOOS     : linux"
+          echo "GOARCH   : ${TARGET_ARCH}"
+          echo "CGO      : 0"
+          echo "Tags     : ${TAGS}"
+          echo "=========================================="
+
 
           GOOS=linux \
           GOARCH="${TARGET_ARCH}" \
@@ -479,6 +485,7 @@ jobs:
             -tags "${TAGS}" \
             -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${OFFICIAL_VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
             ./cmd/sing-box
+
 
           chmod +x release/package/sing-box
 
@@ -492,11 +499,13 @@ jobs:
 
           test -x release/package/sing-box
 
-          echo "==> sing-box version:"
+          echo "==> Binary version:"
           release/package/sing-box version
 
           release/package/sing-box version |
             grep -F "version ${EXPECTED_VERSION}"
+
+          echo "Binary version verification: OK"
 
 
       - name: Check XHTTP configuration
@@ -553,23 +562,21 @@ jobs:
             check \
             -c release/xhttp-test.json
 
-          echo "XHTTP inbound configuration: OK"
-          echo "XHTTP outbound configuration: OK"
+          echo "XHTTP configuration check: OK"
 
 
-      - name: Generate and verify schema
+      - name: Generate schema and verify XHTTP
         shell: bash
         run: |
           set -euo pipefail
 
           release/package/sing-box \
-            generate \
-            schema \
+            generate schema \
             > release/schema.json
 
           grep -F '"xhttp"' release/schema.json
 
-          echo "XHTTP schema: OK"
+          echo "XHTTP schema verification: OK"
 
 
       - name: Create fixed release archive
@@ -581,7 +588,7 @@ jobs:
 
           mkdir -p release
 
-          case "${TARGET_ARCH}" in
+          case "$TARGET_ARCH" in
             amd64)
               ARCHIVE="release/sing-box-linux-amd64.tar.gz"
               ;;
@@ -589,33 +596,35 @@ jobs:
               ARCHIVE="release/sing-box-linux-arm64.tar.gz"
               ;;
             *)
-              echo "ERROR: Unsupported architecture: ${TARGET_ARCH}"
+              echo "ERROR: Unsupported architecture: $TARGET_ARCH"
               exit 1
               ;;
           esac
 
           tar \
             -C release/package \
-            -czf "${ARCHIVE}" \
+            -czf "$ARCHIVE" \
             sing-box
 
-          test -f "${ARCHIVE}"
+          test -f "$ARCHIVE"
 
-          echo "Created:"
-          ls -lh "${ARCHIVE}"
+          echo
+          echo "Created archive:"
+          ls -lh "$ARCHIVE"
 
+          echo
           echo "Archive contents:"
-          tar -tzf "${ARCHIVE}"
+          tar -tzf "$ARCHIVE"
 
 
-      - name: Verify archive
+      - name: Verify fixed archive
         shell: bash
         env:
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
 
-          case "${TARGET_ARCH}" in
+          case "$TARGET_ARCH" in
             amd64)
               ARCHIVE="release/sing-box-linux-amd64.tar.gz"
               ;;
@@ -628,35 +637,12 @@ jobs:
               ;;
           esac
 
-          test -f "${ARCHIVE}"
+          test -f "$ARCHIVE"
 
-          tar -tzf "${ARCHIVE}" |
+          tar -tzf "$ARCHIVE" |
             grep -Fx "sing-box"
 
           echo "Archive verification: OK"
-
-
-      - name: Generate SHA256
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd release
-
-          sha256sum \
-            sing-box-linux-amd64.tar.gz \
-            sing-box-linux-arm64.tar.gz \
-            2>/dev/null || true
-
-          if [ -f "sing-box-linux-amd64.tar.gz" ]; then
-            sha256sum sing-box-linux-amd64.tar.gz > SHA256SUMS
-          fi
-
-          if [ -f "sing-box-linux-arm64.tar.gz" ]; then
-            sha256sum sing-box-linux-arm64.tar.gz >> SHA256SUMS
-          fi
-
-          cat SHA256SUMS
 
 
       - name: Upload amd64 archive
@@ -664,8 +650,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sing-box-linux-amd64
-          path: |
-            release/sing-box-linux-amd64.tar.gz
+          path: release/sing-box-linux-amd64.tar.gz
           if-no-files-found: error
 
 
@@ -674,8 +659,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sing-box-linux-arm64
-          path: |
-            release/sing-box-linux-arm64.tar.gz
+          path: release/sing-box-linux-arm64.tar.gz
           if-no-files-found: error
 
 
@@ -693,30 +677,43 @@ jobs:
           name: sing-box-linux-amd64
           path: release
 
+
       - name: Download arm64 archive
         uses: actions/download-artifact@v4
         with:
           name: sing-box-linux-arm64
           path: release
 
+
       - name: Verify final release files
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Checking final release files..."
+
           test -f release/sing-box-linux-amd64.tar.gz
           test -f release/sing-box-linux-arm64.tar.gz
 
-          echo "Final release files:"
+          echo
+          echo "Files:"
           ls -lh \
             release/sing-box-linux-amd64.tar.gz \
             release/sing-box-linux-arm64.tar.gz
 
-          echo "==> amd64:"
+
+          echo
+          echo "amd64 archive:"
           tar -tzf release/sing-box-linux-amd64.tar.gz
 
-          echo "==> arm64:"
+
+          echo
+          echo "arm64 archive:"
           tar -tzf release/sing-box-linux-arm64.tar.gz
+
+
+          echo
+          echo "Generating SHA256SUMS..."
 
           cd release
 
@@ -737,21 +734,25 @@ jobs:
           generate_release_notes: false
 
           body: |
-            Based on official SagerNet/sing-box:
+            Based on official SagerNet/sing-box.
 
+            Versions:
             - sing-box: v${{ needs.get-version.outputs.upstream_version }}
             - sing-xhttp: ${{ needs.get-version.outputs.xhttp_version }}
 
             XHTTP:
+            - V2Ray Transport XHTTP
             - inbound / server
             - outbound / client
             - transport.type = xhttp
 
-            Build:
+            Build tags:
             - official release/DEFAULT_BUILD_TAGS
-            - official release/LDFLAGS
             - with_purego
             - with_v2ray_api
+
+            Linker flags:
+            - official release/LDFLAGS
 
             Architectures:
             - Linux amd64
