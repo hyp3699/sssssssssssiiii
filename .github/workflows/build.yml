@@ -19,27 +19,35 @@ jobs:
         id: version
         run: |
           set -euo pipefail
+
           UPSTREAM_VERSION="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
+
           [ -n "$UPSTREAM_VERSION" ] || exit 1
+
           LX_TAG="$(git ls-remote --tags --refs https://github.com/Leadaxe/sing-box-lx.git "v${UPSTREAM_VERSION}-lx.*" | awk -F/ '{print $3}' | sort -V | tail -n1)"
+
           [ -n "$LX_TAG" ] || {
             echo "No sing-box-lx release found for v${UPSTREAM_VERSION}"
             exit 1
           }
+
           echo "upstream_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
           echo "lx_tag=${LX_TAG}" >> "$GITHUB_OUTPUT"
+
           echo "Official: v${UPSTREAM_VERSION}"
           echo "LX: ${LX_TAG}"
 
   build:
     needs: get-version
     runs-on: ubuntu-24.04
+
     strategy:
       fail-fast: false
       matrix:
         arch:
           - amd64
           - arm64
+
     steps:
       - name: Checkout official sing-box
         uses: actions/checkout@v5
@@ -52,13 +60,21 @@ jobs:
       - name: Add sing-box-lx
         run: |
           set -euxo pipefail
+
           git remote add lx https://github.com/Leadaxe/sing-box-lx.git
-          git fetch --no-tags --depth=1 lx ${{ needs.get-version.outputs.lx_tag }}
+
+          git fetch \
+            --no-tags \
+            --depth=1 \
+            lx \
+            ${{ needs.get-version.outputs.lx_tag }}
 
       - name: Merge XHTTP
         run: |
           set -euxo pipefail
+
           mkdir -p /tmp/xhttp-patch
+
           git diff \
             HEAD \
             FETCH_HEAD \
@@ -69,16 +85,23 @@ jobs:
             transport/v2rayxhttp \
             transport/v2ray/transport.go \
             transport/v2ray/registry.go \
+            common/badh2 \
             > /tmp/xhttp-patch/xhttp.patch
+
           if [ ! -s /tmp/xhttp-patch/xhttp.patch ]; then
             echo "XHTTP patch is empty"
             exit 1
           fi
+
           git apply --3way /tmp/xhttp-patch/xhttp.patch
+
           rm -rf /tmp/xhttp-patch
+
           test -f option/v2ray_xhttp.go
           test -f include/v2rayxhttp.go
           test -d transport/v2rayxhttp
+          test -d common/badh2
+
           echo "XHTTP merge completed"
 
       - name: Setup Go
@@ -92,18 +115,23 @@ jobs:
           GOOS: linux
         run: |
           set -euxo pipefail
+
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             GOARCH=amd64
           else
             GOARCH=arm64
           fi
-          TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_xhttp,with_v2ray_api"
+
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS),with_purego,with_xhttp,with_v2ray_api"
           LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+
           echo "Official version: ${{ needs.get-version.outputs.upstream_version }}"
           echo "LX version: ${{ needs.get-version.outputs.lx_tag }}"
           echo "Architecture: ${GOARCH}"
           echo "Build tags: ${TAGS}"
+
           go mod download
+
           go build -v -trimpath \
             -o "sing-box-linux-${{ matrix.arch }}" \
             -tags "${TAGS}" \
@@ -113,8 +141,11 @@ jobs:
       - name: Check build
         run: |
           set -euxo pipefail
+
           chmod +x "sing-box-linux-${{ matrix.arch }}"
+
           "./sing-box-linux-${{ matrix.arch }}" version
+
           ls -lh "sing-box-linux-${{ matrix.arch }}"
           file "sing-box-linux-${{ matrix.arch }}"
 
@@ -129,7 +160,9 @@ jobs:
     needs:
       - get-version
       - build
+
     runs-on: ubuntu-24.04
+
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v5
@@ -139,8 +172,14 @@ jobs:
       - name: Prepare release
         run: |
           set -euxo pipefail
+
           mkdir -p release
-          find release-files -type f -name 'sing-box-linux-*' -exec cp {} release/ \;
+
+          find release-files \
+            -type f \
+            -name 'sing-box-linux-*' \
+            -exec cp {} release/ \;
+
           ls -lh release
 
       - name: Create Release
@@ -148,6 +187,7 @@ jobs:
         with:
           tag_name: v${{ needs.get-version.outputs.upstream_version }}-xhttp-v2rayapi
           name: sing-box v${{ needs.get-version.outputs.upstream_version }} XHTTP + V2Ray API
+
           body: |
             Official SagerNet/sing-box v${{ needs.get-version.outputs.upstream_version }}
 
@@ -156,11 +196,13 @@ jobs:
 
             Build:
             Official sing-box features preserved.
+            Added with_purego for CGO disabled builds.
             Added with_xhttp.
             Added with_v2ray_api.
 
             Architectures:
             Linux amd64
             Linux arm64
+
           files: release/*
           make_latest: false
