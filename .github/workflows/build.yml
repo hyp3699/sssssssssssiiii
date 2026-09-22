@@ -518,6 +518,20 @@ jobs:
             release/sing-box-linux-amd64 \
             release/sing-box-linux-arm64
 
+          tar -czf \
+            release/sing-box-linux-amd64.tar.gz \
+            -C release \
+            sing-box-linux-amd64
+
+          tar -czf \
+            release/sing-box-linux-arm64.tar.gz \
+            -C release \
+            sing-box-linux-arm64
+
+          rm -f \
+            release/sing-box-linux-amd64 \
+            release/sing-box-linux-arm64
+
           ls -lh release
 
       - name: Create Release
@@ -548,7 +562,7 @@ jobs:
             XHTTP is imported using three-way file merging from the LX XHTTP history.
 
           files: |
-            release/sing-box-linux-amd64
-            release/sing-box-linux-arm64
+            release/sing-box-linux-amd64.tar.gz
+            release/sing-box-linux-arm64.tar.gz
 
           fail_on_unmatched_files: true
