@@ -1,0 +1,4 @@
+Repository: https://github.com/zakuwaki/sing-box
+Branch: self-use
+Commit: 8a63fb5
+Commit message: feat: add connection limiter for bandwidth and timeout
