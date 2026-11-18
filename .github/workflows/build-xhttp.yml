@@ -1,13 +1,17 @@
 name: Build sing-box with XHTTP
 
+# Manual only: releasing is an explicit action, so nothing builds on push.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
+
+# Two manual runs must not race on the same tag/asset set: queue them instead
+# of cancelling, so the second one starts after the first finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SING_BOX_REPO: SagerNet/sing-box
@@ -83,6 +87,49 @@ jobs:
             echo "sing_box_version=${SING_BOX_VERSION}"
             echo "xhttp_version=${XHTTP_VERSION}"
           } >> "${GITHUB_OUTPUT}"
+
+  # ================================================================
+  # Unit tests of the vendored sing-xhttp library
+  #
+  # Runs once per workflow run (not per architecture) against the library
+  # exactly as the build below vendors it.
+  # ================================================================
+
+  test-xhttp-library:
+    name: Test sing-xhttp library
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repository (vendored xhttp)
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: xhttp/library/go.mod
+          cache: true
+          cache-dependency-path: xhttp/library/go.sum
+
+      - name: Test library packages
+        working-directory: xhttp/library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Host toolchain:"
+          go version
+          go env GOOS GOARCH CGO_ENABLED
+
+          echo
+          echo "Downloading modules..."
+          go mod download
+
+          echo
+          echo "Testing library packages..."
+          go test -count=1 ./...
+
+          echo
+          echo "Library tests passed."
 
   build:
     name: Build linux-${{ matrix.arch }}
@@ -630,6 +677,7 @@ jobs:
     needs:
       - get-version
       - build
+      - test-xhttp-library
 
     runs-on: ubuntu-latest
 
@@ -702,6 +750,12 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: false
+
+          # The tag already exists whenever this workflow is re-run for the
+          # same sing-box version. action-gh-release then updates that release
+          # in place, and overwrite_files replaces the archives with the ones
+          # from this run instead of failing on the existing names.
+          overwrite_files: true
 
           body: |
             sing-box: ${{ needs.get-version.outputs.sing_box_version }}

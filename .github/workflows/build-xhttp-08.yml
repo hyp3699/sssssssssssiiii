@@ -1,13 +1,17 @@
 name: Build sing-box with XHTTP
 
+# Manual only: releasing is an explicit action, so nothing builds on push.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: write
+
+# Two manual runs must not race on the same tag/asset set: queue them instead
+# of cancelling, so the second one starts after the first finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SING_BOX_REPO: SagerNet/sing-box
