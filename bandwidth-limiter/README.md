@@ -12,6 +12,21 @@ Changes vs. upstream:
 - removed `manager` strategy (needs extended's manager service)
 - fix: `users` strategy now uses each user's own `speed` (upstream used the top-level speed)
 - missing `speed` returns a config error instead of panicking
+- fix: `route.final` is honoured. With no rules of its own the outbound now
+  hands the connection straight to its final outbound. With rules, the
+  sub-router's fallback (`Default()`) resolves to `route.final` instead of the
+  global default outbound, which before could silently send traffic elsewhere
+  or straight back into the limiter.
+- fix: the declared dependencies now include `route.final` and every outbound
+  named by a route rule (nested logical rules included), so those outbounds are
+  started before this one.
+- fix: a single read/write larger than the 64 KiB burst is consumed in pieces
+  instead of failing with `exceeds limiter's burst` and dropping the connection.
+- fix: `FairQueueLimiter` propagates the underlying limiter's error instead of
+  reporting success after a cancelled or rejected wait.
+- `protocol/limiter/bandwidth/limiter_test.go`: unit tests for the three points
+  above plus a `route.final` routing test; `build-xhttp-limiter.yml` runs
+  `go test ./protocol/limiter/bandwidth` on every build.
 
 ## Options
 

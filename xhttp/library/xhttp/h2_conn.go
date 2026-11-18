@@ -177,11 +177,31 @@ func (c *chromeH2Conn) transformWriteFrame(frame []byte) ([]byte, error) {
 	return frame, nil
 }
 
+// chromiumInitialSettings rewrites the SETTINGS payload Go's http2.Transport
+// produced into Chromium's initial SETTINGS: the four settings Chrome sends,
+// in Chrome's ascending-id order.
+//
+// The input is the client's own first SETTINGS frame, so a value that does not
+// match what newChromeLikeH2Transport configured (0x1 / 0x4 / 0x6) means the
+// plumbing broke and the frame is rejected rather than sent with a wrong
+// fingerprint.
+//
+// Settings Go emits on top of those are dropped, not forwarded:
+//
+//   - 0x5 MAX_FRAME_SIZE, which Chrome omits because its value equals the
+//     protocol default. x/net/http2 always writes it, with 16384 for a
+//     Transport; anything else there is a real difference and is rejected.
+//   - any setting a future x/net/http2 release adds (0x8
+//     ENABLE_CONNECT_PROTOCOL, 0x9 NO_RFC7540_PRIORITIES, ...). Chrome does not
+//     send them, so forwarding one would undo the fingerprint this transport
+//     exists for; none of them affect the requests xhttp issues. Earlier
+//     versions required exactly 5 settings and failed the whole connection
+//     when upstream added a sixth.
 func chromiumInitialSettings(payload []byte) ([]byte, error) {
 	if len(payload)%6 != 0 {
 		return nil, errInvalidH2Write
 	}
-	values := make(map[uint16]uint32, 5)
+	values := make(map[uint16]uint32, len(payload)/6)
 	for len(payload) > 0 {
 		id := binary.BigEndian.Uint16(payload[:2])
 		if _, exists := values[id]; exists {
@@ -189,6 +209,9 @@ func chromiumInitialSettings(payload []byte) ([]byte, error) {
 		}
 		values[id] = binary.BigEndian.Uint32(payload[2:6])
 		payload = payload[6:]
+	}
+	if value, exists := values[uint16(http2.SettingMaxFrameSize)]; exists && value != 16384 {
+		return nil, errInvalidH2Write
 	}
 	want := [...]struct {
 		id    uint16
@@ -198,9 +221,6 @@ func chromiumInitialSettings(payload []byte) ([]byte, error) {
 		{2, 0},
 		{4, 6 * 1024 * 1024},
 		{6, 256 * 1024},
-	}
-	if len(values) != len(want)+1 || values[5] != 16384 {
-		return nil, errInvalidH2Write
 	}
 	result := make([]byte, 0, len(want)*6)
 	for _, setting := range want {

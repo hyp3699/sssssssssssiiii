@@ -275,6 +275,77 @@ func TestChromeH2ConnRejectsUnexpectedInitialSettings(t *testing.T) {
 	}
 }
 
+// TestChromiumInitialSettingsDropsSettingsChromeOmits covers settings Go emits
+// that Chrome does not: 0x5 MAX_FRAME_SIZE (default value) and anything a
+// future x/net/http2 release adds. The frame must still be rewritten to
+// Chrome's four settings in Chrome's order, and a non-default MAX_FRAME_SIZE or
+// a broken core value must still be rejected.
+func TestChromiumInitialSettingsDropsSettingsChromeOmits(t *testing.T) {
+	encode := func(settings ...http2.Setting) []byte {
+		t.Helper()
+		var buffer bytes.Buffer
+		framer := http2.NewFramer(&buffer, nil)
+		if err := framer.WriteSettings(settings...); err != nil {
+			t.Fatal(err)
+		}
+		var payload bytes.Buffer
+		if _, err := payload.Write(buffer.Bytes()[h2FrameHeaderLen:]); err != nil {
+			t.Fatal(err)
+		}
+		return payload.Bytes()
+	}
+	core := []http2.Setting{
+		{ID: http2.SettingEnablePush, Val: 0},
+		{ID: http2.SettingInitialWindowSize, Val: 6 * 1024 * 1024},
+		{ID: http2.SettingMaxFrameSize, Val: 16384},
+		{ID: http2.SettingMaxHeaderListSize, Val: 256 * 1024},
+		{ID: http2.SettingHeaderTableSize, Val: 65536},
+	}
+	chromeOrder := []byte{
+		0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x04, 0x00, 0x60, 0x00, 0x00,
+		0x00, 0x06, 0x00, 0x04, 0x00, 0x00,
+	}
+
+	result, err := chromiumInitialSettings(encode(core...))
+	if err != nil {
+		t.Fatalf("core settings rejected: %v", err)
+	}
+	if !bytes.Equal(result, chromeOrder) {
+		t.Fatalf("core settings = %x, want %x", result, chromeOrder)
+	}
+
+	extra := append(append([]http2.Setting{}, core...),
+		http2.Setting{ID: http2.SettingEnableConnectProtocol, Val: 1},
+		http2.Setting{ID: http2.SettingNoRFC7540Priorities, Val: 1},
+	)
+	result, err = chromiumInitialSettings(encode(extra...))
+	if err != nil {
+		t.Fatalf("extra settings rejected: %v", err)
+	}
+	if !bytes.Equal(result, chromeOrder) {
+		t.Fatalf("extra settings = %x, want %x", result, chromeOrder)
+	}
+
+	wrongFrameSize := append([]http2.Setting{}, core...)
+	wrongFrameSize[2].Val = 32768
+	if _, err = chromiumInitialSettings(encode(wrongFrameSize...)); !errors.Is(err, errInvalidH2Write) {
+		t.Fatalf("non-default MAX_FRAME_SIZE error = %v, want %v", err, errInvalidH2Write)
+	}
+
+	wrongWindow := append([]http2.Setting{}, core...)
+	wrongWindow[1].Val = 65535
+	if _, err = chromiumInitialSettings(encode(wrongWindow...)); !errors.Is(err, errInvalidH2Write) {
+		t.Fatalf("unexpected INITIAL_WINDOW_SIZE error = %v, want %v", err, errInvalidH2Write)
+	}
+
+	duplicated := append(append([]http2.Setting{}, core...), http2.Setting{ID: http2.SettingEnablePush, Val: 1})
+	if _, err = chromiumInitialSettings(encode(duplicated...)); !errors.Is(err, errInvalidH2Write) {
+		t.Fatalf("duplicate setting error = %v, want %v", err, errInvalidH2Write)
+	}
+}
+
 func TestChromeH2ConnUnderlyingWriteErrorIsSticky(t *testing.T) {
 	wantErr := errors.New("write failed")
 	underlying := &recordingConn{writeLimit: 7, writeErr: wantErr}

@@ -277,9 +277,12 @@ func newTransportSet(dialer N.Dialer, serverAddr M.Socksaddr, tlsConfig aTLS.Con
 
 	// For HTTP/1.1, set up a raw-socket upload pool matching Xray's approach.
 	// This avoids Go's net/http chunked+keepalive bugs with custom dialers.
+	// The pool must perform the TLS handshake itself when one is configured:
+	// HTTP/1.1 is also the version chosen for TLS with alpn ["http/1.1"],
+	// where the server listens for TLS records, not cleartext HTTP.
 	if httpVersion == "1.1" {
 		ts.h1Pool = newH1ConnPool(func(ctx context.Context) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", serverAddr)
+			return dialHTTP1Conn(ctx, dialer, serverAddr, tlsConfig)
 		})
 	}
 
@@ -357,17 +360,50 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// dialHTTP1Conn opens the raw TCP connection used by the HTTP/1.1 transport and
+// completes the TLS handshake on it when a TLS config is present.
+//
+// decideHTTPVersion selects HTTP/1.1 for two very different endpoints:
+// plaintext (tlsConfig == nil) and TLS with alpn ["http/1.1"]. Skipping the
+// handshake for the latter — which is what a single shared dial function used
+// to do for both http.Transport.DialContext and DialTLSContext — sends a
+// cleartext HTTP request into a TLS listener, so both uploads and downloads
+// fail. Mirror the HTTP/2 path: dial TCP, then hand the socket to
+// aTLS.ClientHandshake.
+func dialHTTP1Conn(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, tlsConfig aTLS.Config) (net.Conn, error) {
+	rawConn, err := dialer.DialContext(ctx, N.NetworkTCP, serverAddr)
+	if err != nil {
+		return nil, err
+	}
+	if tlsConfig == nil {
+		return rawConn, nil
+	}
+	tlsConn, err := aTLS.ClientHandshake(ctx, rawConn, tlsConfig)
+	if err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
 // buildTransportFactory returns a function that creates a fresh
 // http.RoundTripper per pooled xmuxConn. Plaintext gets a stock
 // http.Transport; TLS gets an http2.Transport; HTTP/3 gets an http3.Transport.
 func buildTransportFactory(dialer N.Dialer, tlsConfig aTLS.Config, keepAlivePeriod time.Duration, httpVersion string) func() http.RoundTripper {
 	if httpVersion == "1.1" {
+		// Plain TCP for http:// URLs, TCP + TLS handshake for https:// URLs.
+		// net/http calls DialTLSContext only for HTTPS requests and treats the
+		// returned conn as already TLS-wrapped; DialContext stays plaintext so
+		// a cleartext endpoint is not sent a TLS ClientHello.
 		httpDialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, M.ParseSocksaddr(addr))
 		}
+		httpsDialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialHTTP1Conn(ctx, dialer, M.ParseSocksaddr(addr), tlsConfig)
+		}
 		return func() http.RoundTripper {
 			return &http.Transport{
-				DialTLSContext:  httpDialContext,
+				DialTLSContext:  httpsDialContext,
 				DialContext:     httpDialContext,
 				IdleConnTimeout: 300 * time.Second,
 				// chunked transfer download with KeepAlives is buggy with

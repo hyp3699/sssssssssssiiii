@@ -42,5 +42,27 @@ workflows previously fetched this module from GitHub at build time
 7. `xhttp/upload_queue_test.go` — new tests: Push/Close race (run with
    `-race`), in-order reassembly with a stale duplicate, `rangeRand`
    bounds.
+8. `xhttp/client.go` — **TLS was skipped on the HTTP/1.1 path.** HTTP/1.1
+   is selected both for plaintext (`tlsConfig == nil`) and for TLS with
+   `alpn: ["http/1.1"]`, but the factory gave the raw TCP dial to both
+   `DialContext` and `DialTLSContext` and the upload pool dialed plain
+   TCP as well, so with TLS + alpn http/1.1 every upload POST and the
+   download GET were written as cleartext into a TLS listener. Both now
+   go through the new `dialHTTP1Conn`, which dials TCP and then runs
+   `aTLS.ClientHandshake` when a TLS config is present.
+9. `xhttp/h2_conn.go` — **`chromiumInitialSettings` no longer requires
+   exactly five settings.** It only accepts the five/whatever set x/net/http2
+   emits today (0x1, 0x2, 0x4, 0x5, 0x6) and failed the whole connection
+   when upstream added another one. It now validates the four settings
+   Chrome sends (0x1, 0x2, 0x4, 0x6) and the default 0x5, emits them in
+   Chrome's order, and drops any other setting instead of forwarding it
+   (Chrome does not send those either).
+10. `xhttp/h1_tls_test.go` — new tests: TLS + alpn http/1.1 through
+    `http.Transport.DialTLSContext` and through the raw-socket upload
+    pool, plus a plaintext dial that must stay plaintext.
+    `xhttp/h2_conn_test.go` gained
+    `TestChromiumInitialSettingsDropsSettingsChromeOmits` (extra settings
+    tolerated and dropped, non-default MAX_FRAME_SIZE / unexpected core
+    value / duplicate id still rejected).
 
 Everything else is byte-identical to upstream v0.1.6.

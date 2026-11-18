@@ -372,8 +372,31 @@ type speedLimiter struct {
 	limiter *rate.Limiter
 }
 
+// WaitN waits for n bytes. A single Read/Write can pass more than the limiter's
+// burst (64 KiB), and rate.Limiter.WaitN rejects such a request outright with
+// "exceeds limiter's burst", which used to tear the connection down whenever
+// the upper layer handed us a large buffer. Consume n in burst-sized pieces
+// instead, so any size waits the same total time and never fails for that
+// reason.
 func (r *speedLimiter) WaitN(ctx context.Context, n int) error {
-	return r.limiter.WaitN(ctx, n)
+	if n <= 0 {
+		return nil
+	}
+	burst := r.limiter.Burst()
+	if burst <= 0 {
+		burst = 1
+	}
+	for n > 0 {
+		step := n
+		if step > burst {
+			step = burst
+		}
+		if err := r.limiter.WaitN(ctx, step); err != nil {
+			return err
+		}
+		n -= step
+	}
+	return nil
 }
 
 func (r *speedLimiter) SetSpeed(speed uint64) {

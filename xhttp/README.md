@@ -33,6 +33,10 @@ go mod edit \
   -replace=github.com/justinwoo280/sing-xhttp=./_self/xhttp/library
 ```
 
+Both workflows are manual (`workflow_dispatch`) only, and both first run the
+library's own test suite in the `Test sing-xhttp library` job
+(`cd xhttp/library && go test ./...`) before building.
+
 ## Updating the vendored library
 
 Replace `library/` with the new upstream tag's tree (excluding `.git`),

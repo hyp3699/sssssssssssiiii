@@ -61,7 +61,7 @@ func (l *FairQueueLimiter) WaitN(ctx context.Context, n int) error {
 	select {
 	case l.queue <- struct{}{}:
 	case <-mainRequest.done:
-		return nil
+		return mainRequest.err
 	case <-ctx.Done():
 		l.mtx.Lock()
 		l.removeRequest(id, mainRequestElem)
@@ -71,7 +71,7 @@ func (l *FairQueueLimiter) WaitN(ctx context.Context, n int) error {
 	select {
 	case <-mainRequest.done:
 		<-l.queue
-		return nil
+		return mainRequest.err
 	default:
 	}
 	for {
@@ -102,11 +102,11 @@ func (l *FairQueueLimiter) WaitN(ctx context.Context, n int) error {
 			l.reorder(flowElem)
 		}
 		l.mtx.Unlock()
-		l.limiter.WaitN(firstRequest.ctx, firstRequest.n)
+		firstRequest.err = l.limiter.WaitN(firstRequest.ctx, firstRequest.n)
 		close(firstRequest.done)
 		if firstRequest == mainRequest {
 			<-l.queue
-			return nil
+			return firstRequest.err
 		}
 	}
 }
@@ -154,4 +154,8 @@ type request struct {
 	ctx  context.Context
 	done chan struct{}
 	n    int
+	// err is the result of the limiter for this request. It is written
+	// before done is closed, so every reader that received from done can
+	// read it without further synchronisation.
+	err error
 }
